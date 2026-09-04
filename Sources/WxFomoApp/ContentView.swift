@@ -216,7 +216,7 @@ private struct SidebarView: View {
 
         Section("采集状态") {
           StatusRow(
-            title: "微信",
+            title: "企业微信",
             detail: weChatDetail,
             isReady: model.doctorReport?.weChatRunning == true
           )
@@ -228,7 +228,7 @@ private struct SidebarView: View {
           if let diagnostic = model.historyDiagnostic {
             StatusRow(
               title: "历史样本",
-              detail: "微信 \(diagnostic.decodedNotificationCount)，群命中 \(diagnostic.matchedGroupCount)，附件 \(diagnostic.attachmentCount)",
+              detail: "企业微信 \(diagnostic.decodedNotificationCount)，群命中 \(diagnostic.matchedGroupCount)，附件 \(diagnostic.attachmentCount)",
               isReady: diagnostic.matchedGroupCount > 0
             )
           }
@@ -301,7 +301,7 @@ private struct SidebarView: View {
   private var notificationDetail: String {
     guard model.doctorReport?.notificationDatabaseReadable == true else { return "需要授权" }
     guard let rowID = model.notificationLatestRowID else { return "读取异常" }
-    return rowID > 0 ? "可读取" : "可读取，尚无微信通知"
+    return rowID > 0 ? "可读取" : "可读取，尚无企业微信通知"
   }
 
   private func successfulScanDetail(_ health: NotificationMonitorHealth) -> String {
@@ -776,7 +776,7 @@ private struct MessageFeedView: View {
           }
 
           if model.managementMetrics != nil {
-            Text("待查看表示尚未越过 wxFomo 的逐群查看位置，不是微信未读；重点与抑制按当前规则配置计算。")
+            Text("待查看表示尚未越过 wxFomo 的逐群查看位置，不是企业微信未读；重点与抑制按当前规则配置计算。")
               .font(.caption)
               .foregroundStyle(.tertiary)
               .frame(maxWidth: .infinity, alignment: .leading)
@@ -845,7 +845,7 @@ private struct MessageFeedView: View {
           VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 14) {
               DiagnosticMetric(title: "新增记录", value: health.scannedRecordCount)
-              DiagnosticMetric(title: "识别微信", value: health.identifiedWeChatNotificationCount)
+              DiagnosticMetric(title: "识别企业微信", value: health.identifiedWeChatNotificationCount)
               DiagnosticMetric(title: "解码成功", value: health.decodedNotificationCount)
               DiagnosticMetric(title: "群名命中", value: health.groupMatchedNotificationCount)
               DiagnosticMetric(title: "已发出", value: health.matchedEventCount)
@@ -1130,7 +1130,7 @@ private struct MessageFeedView: View {
   }
 
   private var emptyDescription: String {
-    if model.groups.isEmpty { return "在左侧输入微信群的完整名称。" }
+    if model.groups.isEmpty { return "在左侧输入企业微信群的完整名称。" }
     if model.addressFilter == .webLink {
       return model.hasMoreMessages
         ? "当前已加载消息中没有 HTTP/HTTPS 链接，可载入更早消息后继续筛选。"

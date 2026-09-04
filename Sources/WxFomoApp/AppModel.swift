@@ -3321,11 +3321,11 @@ final class AppModel: ObservableObject {
     case .waitingForNewRecords:
       return "基线后尚未发现新的系统通知。请用另一台设备或其他群友发送测试消息。"
     case .nonWeChatNotifications:
-      return "系统通知数据库有新增记录，但其中没有微信通知。请检查微信和 macOS 通知设置。"
+      return "系统通知数据库有新增记录，但其中没有企业微信通知。请检查企业微信和 macOS 通知设置。"
     case .payloadDecodeFailed:
-      return "发现了微信通知，但当前微信版本的通知 payload 未能解码。"
+      return "发现了企业微信通知，但当前版本的通知 payload 未能解码。"
     case .groupNotMonitored:
-      return "微信通知已成功解码，但群名未命中监听列表。请核对完整群名。"
+      return "企业微信通知已成功解码，但群名或群聊结构未命中监听规则。请核对完整群名。"
     case .matchedGroup:
       if !messages.isEmpty, visibleMessages.isEmpty {
         return "群通知已进入 wxFomo，但被当前视图、搜索或筛选条件隐藏。"
@@ -4585,13 +4585,17 @@ final class AppModel: ObservableObject {
   }
 
   private func receive(_ event: MessageEvent) {
-    activityText = "刚刚收到 \(event.group) 的新消息"
     let suppressSoundForReplay = Date() < soundSuppressedUntil
     guard let messageStore else {
-      guard !messages.contains(where: { $0.eventID == event.eventID }) else { return }
-      messages.append(event)
-      messages.sort(by: MessageEventOrder.latestFirst)
-      invalidatePresentationCaches()
+      let consumption = MessageEventConsumer.withoutStore(event, displayedMessages: messages)
+      applyMessageDisplayUpdate(consumption.displayUpdate)
+      guard consumption.shouldRunNewMessageSideEffects else {
+        if consumption.representsMessageUpdate {
+          activityText = "刚刚更新 \(event.group) 的消息"
+        }
+        return
+      }
+      activityText = "刚刚收到 \(event.group) 的新消息"
       var soundEvents = [messageSoundEvent(kind: .newMessage, event: event, subjectID: event.group)]
       if matchesCaptureKeywords(event) {
         soundEvents.append(
@@ -4606,7 +4610,15 @@ final class AppModel: ObservableObject {
       guard let self else { return }
       do {
         let result = try await messageStore.insert(event)
-        guard result == .inserted else { return }
+        let consumption = MessageEventConsumer.persisted(result)
+        guard consumption.shouldRunNewMessageSideEffects else {
+          self.applyMessageDisplayUpdate(consumption.displayUpdate)
+          if consumption.representsMessageUpdate {
+            self.activityText = "刚刚更新 \(event.group) 的消息"
+          }
+          return
+        }
+        self.activityText = "刚刚收到 \(event.group) 的新消息"
         var soundEvents = [
           self.messageSoundEvent(kind: .newMessage, event: event, subjectID: event.group)
         ]
@@ -4646,10 +4658,22 @@ final class AppModel: ObservableObject {
           )
         }
         if !suppressSoundForReplay { self.playNotificationSounds(soundEvents) }
-        self.scheduleMessageReload()
+        self.applyMessageDisplayUpdate(consumption.displayUpdate)
       } catch {
         self.messageStoreError = error.localizedDescription
       }
+    }
+  }
+
+  private func applyMessageDisplayUpdate(_ update: MessageEventDisplayUpdate) {
+    switch update {
+    case .unchanged:
+      return
+    case .reloadFromStore:
+      scheduleMessageReload()
+    case let .replaceInMemory(updatedMessages):
+      messages = updatedMessages
+      invalidatePresentationCaches()
     }
   }
 

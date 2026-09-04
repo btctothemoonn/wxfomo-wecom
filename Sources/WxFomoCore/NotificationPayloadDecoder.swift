@@ -7,7 +7,8 @@ public struct NotificationPayloadDecoder: Sendable {
     data: Data,
     rowID: Int64,
     deliveredAt: Date,
-    uuid: String?
+    uuid: String?,
+    sourceIdentity: String? = nil
   ) -> NotificationRecord? {
     guard
       let root = try? PropertyListSerialization.propertyList(from: data, format: nil),
@@ -25,8 +26,21 @@ public struct NotificationPayloadDecoder: Sendable {
       subtitle: text(request["subt"]),
       body: text(request["body"]),
       identifier: text(request["iden"]),
-      attachments: attachments(from: request)
+      attachments: attachments(from: request),
+      conversationType: conversationType(from: request),
+      sourceIdentity: sourceIdentity
     )
+  }
+
+  private func conversationType(from request: [String: Any]) -> Int? {
+    guard let archive = request["usda"] as? Data,
+      let decoded = try? NSKeyedUnarchiver.unarchiveTopLevelObjectWithData(archive),
+      let userData = decoded as? [String: Any],
+      let value = userData["ct"] as? NSNumber
+    else {
+      return nil
+    }
+    return value.intValue
   }
 
   private func attachments(from request: [String: Any]) -> [MessageAttachment] {
@@ -62,8 +76,12 @@ public struct NotificationPayloadDecoder: Sendable {
       let resolvedIdentifier = identifier ?? firstText(in: metadata, keys: ["identifier"])
       let resolvedTypeHint = typeHint ?? firstText(in: metadata, keys: ["type"])
       var combinedMetadata = metadata
-      if let resolvedIdentifier { combinedMetadata["identifier"] = resolvedIdentifier }
-      if let resolvedTypeHint { combinedMetadata["type"] = resolvedTypeHint }
+      if let resolvedIdentifier = resolvedIdentifier {
+        combinedMetadata["identifier"] = resolvedIdentifier
+      }
+      if let resolvedTypeHint = resolvedTypeHint {
+        combinedMetadata["type"] = resolvedTypeHint
+      }
 
       for key in ["url", "fileurl", "path", "filepath", "localurl"] {
         guard let candidate = normalized[key], let url = fileURL(from: candidate) else { continue }

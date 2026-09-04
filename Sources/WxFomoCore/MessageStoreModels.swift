@@ -14,6 +14,7 @@ public struct MessageStoreCapabilities: Codable, Equatable, Sendable {
 
 public enum MessageInsertResult: String, Codable, Equatable, Sendable {
   case inserted
+  case updated
   case existing
 }
 

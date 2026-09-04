@@ -779,7 +779,7 @@ private struct AnalysisPendingDetail: View {
 
         Divider()
         Label(
-          "任务只使用创建时冻结的本地已采集消息，不代表微信群完整消息流。",
+          "任务只使用创建时冻结的本地已采集消息，不代表企业微信群完整消息流。",
           systemImage: "exclamationmark.shield"
         )
         .font(.caption)
@@ -853,7 +853,7 @@ private struct AnalysisResultDetail: View, Equatable {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 18) {
         Label(
-          "基于冻结的 \(result.provenance.sourceMessageIDs.count) 条本地已采集消息；不是整个时间区间，也不代表微信群完整信息流。",
+          "基于冻结的 \(result.provenance.sourceMessageIDs.count) 条本地已采集消息；不是整个时间区间，也不代表企业微信群完整信息流。",
           systemImage: "exclamationmark.shield"
         )
         .font(.caption)
@@ -2642,7 +2642,7 @@ private struct SetupChecklistView: View {
     if let rowID = model.notificationLatestRowID, rowID > 0 {
       return "通知数据库可读取，已发现系统通知记录"
     }
-    return "通知数据库可读取，等待微信通知"
+    return "通知数据库可读取，等待企业微信通知"
   }
 
   private var groupsState: SetupCheckState {
@@ -2650,7 +2650,7 @@ private struct SetupChecklistView: View {
   }
 
   private var groupsDetail: String {
-    model.groups.isEmpty ? "至少添加一个需要监听的微信群名" : "已配置 \(model.groups.count) 个监听群"
+    model.groups.isEmpty ? "至少添加一个需要监听的企业微信群名" : "已配置 \(model.groups.count) 个监听群"
   }
 
   private var selectedAIProvider: AIProviderConfiguration? {
@@ -2770,7 +2770,7 @@ private struct SetupChecklistView: View {
         )
       }
 
-      Text("开始监听前还需要微信已运行，并在微信和 macOS 通知设置中允许通知。")
+      Text("开始监听前还需要企业微信已运行，并在企业微信和 macOS 通知设置中允许通知。")
         .font(.caption)
         .foregroundStyle(.secondary)
     }
@@ -3205,7 +3205,7 @@ struct DiagnosticsWorkspaceView: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 0) {
           diagnosticRow(
-            title: "微信进程",
+            title: "企业微信进程",
             value: model.doctorReport?.weChatRunning == true ? "运行中" : "未运行",
             symbol: "bubble.left.and.bubble.right"
           )
@@ -3231,7 +3231,7 @@ struct DiagnosticsWorkspaceView: View {
 
           GroupBox {
             Label(
-              "wxFomo 只能量化系统实际投递并成功解码的通知，不能测量微信群真实消息总量或推导完整率。",
+              "wxFomo 只能量化系统实际投递并成功解码的通知，不能测量企业微信群真实消息总量或推导完整率。",
               systemImage: "exclamationmark.shield"
             )
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3304,7 +3304,7 @@ struct AnalysisComposerView: View {
           )
           .font(.callout.weight(.medium))
 
-          Text("输入来自 wxFomo 已采集的本地通知消息，不代表微信群完整信息流。提交后消息范围会被冻结，后台任务只读取这份快照。")
+          Text("输入来自 wxFomo 已采集的本地通知消息，不代表企业微信群完整信息流。提交后消息范围会被冻结，后台任务只读取这份快照。")
             .font(.caption)
             .foregroundStyle(.secondary)
 

@@ -9,4 +9,13 @@ public enum StableHash {
     }
     return String(format: "%016llx", hash)
   }
+
+  public static func notificationRecordFingerprint(_ record: NotificationRecord) -> String {
+    let attachmentSeed = record.attachments.map(\.fileURL.absoluteString).joined(separator: "|")
+    return hex(
+      "notification-record|\(record.sourceIdentity ?? "")|\(record.rowID)|"
+        + "\(record.uuid ?? "")|\(record.deliveredAt.timeIntervalSinceReferenceDate)|"
+        + "\(record.title)|\(record.subtitle)|\(record.body)|\(attachmentSeed)"
+    )
+  }
 }

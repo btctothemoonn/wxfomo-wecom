@@ -129,6 +129,7 @@ public actor MessageStore {
       for event in events {
         switch try insertOne(event) {
         case .inserted: insertedCount += 1
+        case .updated: existingCount += 1
         case .existing: existingCount += 1
         }
       }
@@ -1630,7 +1631,9 @@ private extension MessageStore {
   }
 
   func insertOne(_ event: MessageEvent) throws -> MessageInsertResult {
-    if try messageExists(event.eventID) { return .existing }
+    if try messageExists(event.eventID) {
+      return try updateExistingMessage(event) ? .updated : .existing
+    }
 
     let now = Date().timeIntervalSince1970
     let group = event.group.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1706,6 +1709,68 @@ private extension MessageStore {
     )
     guard sqlite3_step(update) == SQLITE_DONE else { throw queryError("conversation_update") }
     return .inserted
+  }
+
+  func updateExistingMessage(_ event: MessageEvent) throws -> Bool {
+    let attachmentsData = try encode(event.attachments, field: "attachments")
+    let observedAt = event.observedAt.timeIntervalSince1970
+    let group = event.group.trimmingCharacters(in: .whitespacesAndNewlines)
+    let senderDisplayName = event.senderDisplayName.map(SQLiteValue.text) ?? .null
+    let senderStableID = event.senderStableID.map(SQLiteValue.text) ?? .null
+    let sourceSequence = event.sourceSequence.map(SQLiteValue.int64) ?? .null
+    let isFromSelf = SQLiteValue.int64(event.isFromSelf ? 1 : 0)
+    let values: [SQLiteValue] = [
+      senderDisplayName, senderStableID, .text(event.content), .text(event.messageType.rawValue),
+      .double(observedAt), sourceSequence, .blob(attachmentsData),
+      .int64(Int64(event.attachments.count)), .text(event.senderConfidence.rawValue), isFromSelf,
+    ]
+    let statement = try prepare(
+      """
+      UPDATE messages
+      SET sender_display_name = ?, sender_stable_id = ?, content = ?, message_type = ?,
+        observed_at = ?, source_sequence = ?, attachments_json = ?, attachment_count = ?,
+        sender_confidence = ?, is_from_self = ?, record_version = record_version + 1
+      WHERE event_id = ? AND group_name = ? AND observed_at <= ? AND (
+        sender_display_name IS NOT ? OR sender_stable_id IS NOT ? OR content <> ? OR
+        message_type <> ? OR observed_at <> ? OR source_sequence IS NOT ? OR
+        attachments_json <> ? OR attachment_count <> ? OR sender_confidence <> ? OR
+        is_from_self <> ?
+      )
+      """,
+      operation: "message_update"
+    )
+    defer { sqlite3_finalize(statement) }
+    try bind(
+      values + [.text(event.eventID), .text(group), .double(observedAt)] + values,
+      to: statement,
+      operation: "message_update"
+    )
+    guard sqlite3_step(statement) == SQLITE_DONE else { throw queryError("message_update") }
+    guard sqlite3_changes(database) == 1 else { return false }
+
+    let now = Date().timeIntervalSince1970
+    let conversation = try prepare(
+      """
+      UPDATE conversations
+      SET updated_at = ?,
+        last_message_at = CASE
+          WHEN last_message_at IS NULL OR last_message_at < ? THEN ?
+          ELSE last_message_at
+        END
+      WHERE id = (SELECT conversation_id FROM messages WHERE event_id = ?)
+      """,
+      operation: "conversation_message_update"
+    )
+    defer { sqlite3_finalize(conversation) }
+    try bind(
+      [.double(now), .double(observedAt), .double(observedAt), .text(event.eventID)],
+      to: conversation,
+      operation: "conversation_message_update"
+    )
+    guard sqlite3_step(conversation) == SQLITE_DONE else {
+      throw queryError("conversation_message_update")
+    }
+    return true
   }
 
   func messageExists(_ eventID: String) throws -> Bool {

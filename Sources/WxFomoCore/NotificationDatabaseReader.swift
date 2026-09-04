@@ -1,12 +1,20 @@
+import Darwin
 import Foundation
 import SQLite3
 
 public protocol NotificationRecordReading: AnyObject {
   var databaseURL: URL { get }
+  var sourceIdentity: String? { get }
   var isReadable: Bool { get }
   func latestRowID() throws -> Int64
   func recentRecords(limit: Int) throws -> [NotificationRecord]
   func batch(after rowID: Int64, limit: Int) throws -> NotificationRecordBatch
+}
+
+public extension NotificationRecordReading {
+  var sourceIdentity: String? {
+    NotificationDatabaseReader.sourceIdentity(for: databaseURL)
+  }
 }
 
 public enum NotificationDatabaseError: LocalizedError {
@@ -148,17 +156,25 @@ public struct NotificationDatabaseDiagnostics: Equatable, Sendable {
 }
 
 public final class NotificationDatabaseReader: NotificationRecordReading {
-  public static let weChatBundleIdentifier = "com.tencent.xinWeChat"
-  public static let weChatTeamIdentifier = "5A4RE8SF68"
-  public static let weChatNotificationIdentifiers = [
-    weChatBundleIdentifier,
-    "\(weChatTeamIdentifier).\(weChatBundleIdentifier)",
-  ]
-  public static let defaultDatabaseURL = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("Library/Group Containers/group.com.apple.usernoted/db2/db")
+  public static let weChatBundleIdentifier = WeComNotificationPolicy.bundleIdentifier
+  public static let weChatTeamIdentifier = WeComNotificationPolicy.teamIdentifier
+  public static let weChatNotificationIdentifiers =
+    WeComNotificationPolicy.notificationIdentifiers
+  public static let defaultDatabaseURL = NotificationDatabaseLocation.defaultURL()
 
   public let databaseURL: URL
   private let decoder: NotificationPayloadDecoder
+
+  public static func sourceIdentity(for databaseURL: URL) -> String? {
+    let path = databaseURL.standardizedFileURL.path
+    var info = stat()
+    guard lstat(path, &info) == 0,
+      info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+    else {
+      return nil
+    }
+    return "\(path)|\(info.st_dev)|\(info.st_ino)"
+  }
 
   public init(
     databaseURL: URL = NotificationDatabaseReader.defaultDatabaseURL,
@@ -184,9 +200,9 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
       SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
       nil
     )
-    guard result == SQLITE_OK, let database else {
+    guard result == SQLITE_OK, database != nil else {
       let message = sqlite3_errmsg(database).map(String.init(cString:)) ?? ""
-      if let database { sqlite3_close(database) }
+      if let database = database { sqlite3_close(database) }
       let denied = message.localizedCaseInsensitiveContains("authorization denied")
         || message.localizedCaseInsensitiveContains("operation not permitted")
       return denied ? .permissionDenied : .unreadable(message)
@@ -196,9 +212,9 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
   }
 
   public func diagnostics(sampleLimit: Int = 10) throws -> NotificationDatabaseDiagnostics {
-    let availability = availability()
+    let currentAvailability = availability()
     var diagnostics = NotificationDatabaseDiagnostics(
-      availability: availability,
+      availability: currentAvailability,
       tableNames: [],
       totalRecordCount: 0,
       maxRowID: 0,
@@ -206,13 +222,13 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
       weChatRecordCount: 0,
       samples: []
     )
-    guard availability == .readable else { return diagnostics }
+    guard currentAvailability == .readable else { return diagnostics }
 
     try withDatabase { database in
       diagnostics = try Self.collectDiagnostics(
         database,
         databaseURL: databaseURL,
-        availability: availability,
+        availability: currentAvailability,
         decoder: decoder,
         sampleLimit: sampleLimit
       )
@@ -284,7 +300,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
             SELECT COUNT(*)
             FROM record r
             JOIN app a ON a.app_id = r.app_id
-            WHERE a.identifier IN (\(identifierPlaceholders))
+            WHERE LOWER(TRIM(a.identifier)) IN (\(identifierPlaceholders))
             """,
           bindings: identifierValues
         )) ?? 0
@@ -319,7 +335,14 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
     -> [NotificationDiagnosticSample]
   {
     try withDatabase { database in
-      try Self.queryNewSamples(database, table: table, after: rowID, limit: limit, decoder: decoder)
+      try Self.queryNewSamples(
+        database,
+        table: table,
+        after: rowID,
+        limit: limit,
+        decoder: decoder,
+        sourceIdentity: Self.sourceIdentity(for: databaseURL)
+      )
     }
   }
 
@@ -328,13 +351,14 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
     table: String,
     after rowID: Int64,
     limit: Int,
-    decoder: NotificationPayloadDecoder
+    decoder: NotificationPayloadDecoder,
+    sourceIdentity: String?
   ) throws -> [NotificationDiagnosticSample] {
     let quoted = "\"\(table)\""
     let sql = "SELECT rowid, * FROM \(quoted) WHERE rowid > ? ORDER BY rowid LIMIT ?"
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-      let statement
+      statement != nil
     else {
       throw Self.queryError(database)
     }
@@ -375,7 +399,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
             deliveredAt = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, column))
           }
         case "uuid":
-          uuid = stringOrBlob(statement, column: column)
+          uuid = stringOrBlob(statement!, column: column)
         case "app_id":
           appID = sqlite3_column_int64(statement, column)
         default:
@@ -394,7 +418,8 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
           data: data,
           rowID: rowID,
           deliveredAt: resolvedAt,
-          uuid: uuid
+          uuid: uuid,
+          sourceIdentity: sourceIdentity
         )
       {
         decoded = true
@@ -427,7 +452,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
     let sql = "PRAGMA table_info(\"\(table)\")"
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-      let statement
+      statement != nil
     else {
       throw Self.queryError(database)
     }
@@ -457,7 +482,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
       """
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-      let statement
+      statement != nil
     else {
       throw Self.queryError(database)
     }
@@ -488,7 +513,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(database, "SELECT app_id, identifier FROM app", -1, &statement, nil)
       == SQLITE_OK,
-      let statement
+      statement != nil
     else {
       throw Self.queryError(database)
     }
@@ -511,19 +536,20 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
     identifierPlaceholders: String,
     identifierValues: [String],
     limit: Int,
-    decoder: NotificationPayloadDecoder
+    decoder: NotificationPayloadDecoder,
+    sourceIdentity: String? = nil
   ) throws -> [NotificationDiagnosticSample] {
     let sql = """
       SELECT r.rowid, r.uuid, r.data, r.delivered_date, a.identifier
       FROM record r
       JOIN app a ON a.app_id = r.app_id
-      WHERE a.identifier IN (\(identifierPlaceholders))
+      WHERE LOWER(TRIM(a.identifier)) IN (\(identifierPlaceholders))
       ORDER BY r.rowid DESC
       LIMIT ?
       """
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-      let statement
+      statement != nil
     else {
       throw Self.queryError(database)
     }
@@ -543,7 +569,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
       guard result == SQLITE_ROW else { throw Self.queryError(database) }
 
       let rowID = sqlite3_column_int64(statement, 0)
-      let uuid = stringOrBlob(statement, column: 1)
+      let uuid = stringOrBlob(statement!, column: 1)
       let payloadByteCount = Int(sqlite3_column_bytes(statement, 2))
       let data: Data
       if let bytes = sqlite3_column_blob(statement, 2), payloadByteCount > 0 {
@@ -554,7 +580,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
       let deliveredAt = Date(
         timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 3)
       )
-      let identifier = stringOrBlob(statement, column: 4) ?? ""
+      let identifier = stringOrBlob(statement!, column: 4) ?? ""
 
       var title = ""
       var subtitle = ""
@@ -564,7 +590,8 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
         data: data,
         rowID: rowID,
         deliveredAt: deliveredAt,
-        uuid: uuid
+        uuid: uuid,
+        sourceIdentity: sourceIdentity
       ) {
         decoded = true
         title = record.title
@@ -601,7 +628,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
       """
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-      let statement
+      statement != nil
     else {
       throw Self.queryError(database)
     }
@@ -631,7 +658,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
   ) throws -> Int64? {
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-      let statement
+      statement != nil
     else {
       throw Self.queryError(database)
     }
@@ -652,7 +679,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
   private static func scalarStrings(_ database: OpaquePointer, sql: String) throws -> [String] {
     var statement: OpaquePointer?
     guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-      let statement
+      statement != nil
     else {
       throw Self.queryError(database)
     }
@@ -695,7 +722,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
         """
       var statement: OpaquePointer?
       guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-        let statement
+        statement != nil
       else {
         throw Self.queryError(database)
       }
@@ -721,7 +748,8 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
   }
 
   public func recentRecords(limit: Int = 20) throws -> [NotificationRecord] {
-    try withDatabase { database in
+    let sourceIdentity = try sourceIdentityForRead()
+    return try withDatabase { database in
       let boundedLimit = max(1, min(limit, 500))
       let placeholders = Self.weChatNotificationIdentifiers.map { _ in "?" }
         .joined(separator: ", ")
@@ -730,12 +758,13 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
         FROM record r
         JOIN app a ON a.app_id = r.app_id
         WHERE LOWER(TRIM(a.identifier)) IN (\(placeholders))
-        ORDER BY r.rowid DESC
+        ORDER BY COALESCE(r.request_last_date, r.delivered_date, r.request_date, 0) DESC,
+          r.rowid DESC
         LIMIT ?
         """
       var statement: OpaquePointer?
       guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-        let statement
+        statement != nil
       else {
         throw Self.queryError(database)
       }
@@ -775,11 +804,13 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
           data: data,
           rowID: rowID,
           deliveredAt: deliveredAt,
-          uuid: Self.stringOrBlob(statement, column: 1)
+          uuid: Self.stringOrBlob(statement!, column: 1),
+          sourceIdentity: sourceIdentity
         ) {
           records.append(decoded)
         }
       }
+      try assertSourceIdentityUnchanged(sourceIdentity)
       return records.reversed()
     }
   }
@@ -790,7 +821,8 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
     limit: Int,
     descending: Bool
   ) throws -> NotificationRecordBatch {
-    try withDatabase { database in
+    let sourceIdentity = try sourceIdentityForRead()
+    return try withDatabase { database in
       let direction = descending ? "DESC" : "ASC"
       let sql = """
         SELECT r.rowid, r.uuid, r.data, r.delivered_date, a.identifier
@@ -802,14 +834,14 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
         """
       var statement: OpaquePointer?
       guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-        let statement
+        statement != nil
       else {
         throw Self.queryError(database)
       }
       defer { sqlite3_finalize(statement) }
 
       var bindingIndex: Int32 = 1
-      if let rowID {
+      if let rowID = rowID {
         sqlite3_bind_int64(statement, bindingIndex, rowID)
         bindingIndex += 1
       }
@@ -829,13 +861,13 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
         lastScannedRowID = rowID
         scannedCount += 1
         guard
-          let appIdentifier = Self.stringOrBlob(statement, column: 4),
+          let appIdentifier = Self.stringOrBlob(statement!, column: 4),
           Self.isWeChatNotificationIdentifier(appIdentifier)
         else {
           continue
         }
         weChatRecordCount += 1
-        let uuid = Self.stringOrBlob(statement, column: 1)
+        let uuid = Self.stringOrBlob(statement!, column: 1)
         guard
           let bytes = sqlite3_column_blob(statement, 2),
           sqlite3_column_bytes(statement, 2) > 0
@@ -854,20 +886,36 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
           data: data,
           rowID: rowID,
           deliveredAt: deliveredAt,
-          uuid: uuid
+          uuid: uuid,
+          sourceIdentity: sourceIdentity
         ) {
           records.append(decoded)
         } else {
           payloadDecodeFailureCount += 1
         }
       }
-      return NotificationRecordBatch(
+      let batch = NotificationRecordBatch(
         records: records,
         lastScannedRowID: lastScannedRowID,
         scannedCount: scannedCount,
         weChatRecordCount: weChatRecordCount,
         payloadDecodeFailureCount: payloadDecodeFailureCount
       )
+      try assertSourceIdentityUnchanged(sourceIdentity)
+      return batch
+    }
+  }
+
+  private func sourceIdentityForRead() throws -> String {
+    guard let identity = Self.sourceIdentity(for: databaseURL) else {
+      throw NotificationDatabaseError.databaseUnreadable(databaseURL.path)
+    }
+    return identity
+  }
+
+  private func assertSourceIdentityUnchanged(_ expectedIdentity: String) throws {
+    guard Self.sourceIdentity(for: databaseURL) == expectedIdentity else {
+      throw NotificationDatabaseError.queryFailed("通知数据库在读取期间已更改")
     }
   }
 
@@ -884,13 +932,14 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
       SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
       nil
     )
-    guard result == SQLITE_OK, let database else {
-      if let database { sqlite3_close(database) }
+    guard result == SQLITE_OK, database != nil else {
+      if let database = database { sqlite3_close(database) }
       throw NotificationDatabaseError.databaseUnreadable(path)
     }
-    defer { sqlite3_close(database) }
-    sqlite3_busy_timeout(database, 1_000)
-    return try body(database)
+    let openedDatabase = database!
+    defer { sqlite3_close(openedDatabase) }
+    sqlite3_busy_timeout(openedDatabase, 1_000)
+    return try body(openedDatabase)
   }
 
   private static func queryError(_ database: OpaquePointer) -> NotificationDatabaseError {
@@ -899,11 +948,7 @@ public final class NotificationDatabaseReader: NotificationRecordReading {
   }
 
   public static func isWeChatNotificationIdentifier(_ identifier: String) -> Bool {
-    weChatNotificationIdentifiers.contains {
-      $0.caseInsensitiveCompare(
-        identifier.trimmingCharacters(in: .whitespacesAndNewlines)
-      ) == .orderedSame
-    }
+    WeComNotificationPolicy.isNotificationIdentifier(identifier)
   }
 
   private static func stringOrBlob(_ statement: OpaquePointer, column: Int32) -> String? {

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import WxFomoCore
 
@@ -27,19 +28,46 @@ private func requireMessage(
 }
 
 private final class FakeNotificationReader: NotificationRecordReading {
-  let databaseURL = FileManager.default.temporaryDirectory
+  let databaseURL: URL
   var isReadable: Bool { true }
 
   private let lock = NSLock()
   private var storedRecords: [NotificationRecord]
+  private var storedSourceIdentity: String?
+  private var pendingSourceReplacement: (() -> (String?, [NotificationRecord]))?
   private var remainingBatchFailures = 0
 
-  init(records: [NotificationRecord] = []) {
+  init(
+    records: [NotificationRecord] = [],
+    databaseURL: URL = FileManager.default.temporaryDirectory,
+    sourceIdentity: String? = nil
+  ) {
     storedRecords = records
+    self.databaseURL = databaseURL
+    storedSourceIdentity = sourceIdentity
+  }
+
+  var sourceIdentity: String? {
+    lock.withLock {
+      if let replacement = pendingSourceReplacement {
+        let (identity, records) = replacement()
+        storedSourceIdentity = identity
+        storedRecords = records
+        pendingSourceReplacement = nil
+      }
+      return storedSourceIdentity
+        ?? NotificationDatabaseReader.sourceIdentity(for: databaseURL)
+    }
   }
 
   func replace(records: [NotificationRecord]) {
     lock.withLock { storedRecords = records }
+  }
+
+  func replaceOnNextSourceIdentityObservation(
+    _ replacement: @escaping () -> (String?, [NotificationRecord])
+  ) {
+    lock.withLock { pendingSourceReplacement = replacement }
   }
 
   func append(_ record: NotificationRecord) {
@@ -56,7 +84,14 @@ private final class FakeNotificationReader: NotificationRecordReading {
 
   func recentRecords(limit: Int) throws -> [NotificationRecord] {
     lock.withLock {
-      Array(storedRecords.sorted { $0.rowID < $1.rowID }.suffix(max(0, limit)))
+      Array(
+        storedRecords.sorted {
+          if $0.deliveredAt != $1.deliveredAt {
+            return $0.deliveredAt < $1.deliveredAt
+          }
+          return $0.rowID < $1.rowID
+        }.suffix(max(0, limit))
+      )
     }
   }
 
@@ -85,6 +120,8 @@ private final class NotificationMonitorCollector {
   private let lock = NSLock()
   private var storedEvents: [MessageEvent] = []
   private var storedHealth: [NotificationMonitorHealth] = []
+  private var storedErrors: [String] = []
+  private var storedInsertResults: [MessageInsertResult] = []
 
   func receive(_ event: MessageEvent) {
     lock.withLock { storedEvents.append(event) }
@@ -94,6 +131,14 @@ private final class NotificationMonitorCollector {
     lock.withLock { storedHealth.append(health) }
   }
 
+  func receive(error: Error) {
+    lock.withLock { storedErrors.append(error.localizedDescription) }
+  }
+
+  func receive(insertResult: MessageInsertResult) {
+    lock.withLock { storedInsertResults.append(insertResult) }
+  }
+
   var events: [MessageEvent] {
     lock.withLock { storedEvents }
   }
@@ -101,21 +146,35 @@ private final class NotificationMonitorCollector {
   var health: [NotificationMonitorHealth] {
     lock.withLock { storedHealth }
   }
+
+  var errors: [String] {
+    lock.withLock { storedErrors }
+  }
+
+  var insertResults: [MessageInsertResult] {
+    lock.withLock { storedInsertResults }
+  }
 }
 
 private func fixtureNotification(
   rowID: Int64,
-  uuid: String,
-  body: String = "张三：测试消息"
+  uuid: String?,
+  subtitle: String = "张三",
+  body: String = "张三：测试消息",
+  deliveredAt: Date? = nil,
+  sourceIdentity: String? = nil
 ) -> NotificationRecord {
   NotificationRecord(
     rowID: rowID,
     uuid: uuid,
-    deliveredAt: Date(timeIntervalSince1970: TimeInterval(1_800_000_000 + rowID)),
+    deliveredAt: deliveredAt
+      ?? Date(timeIntervalSince1970: TimeInterval(1_800_000_000 + rowID)),
     title: "测试群",
-    subtitle: "张三",
+    subtitle: subtitle,
     body: body,
-    identifier: uuid
+    identifier: uuid ?? "",
+    conversationType: 1,
+    sourceIdentity: sourceIdentity
   )
 }
 
@@ -426,39 +485,47 @@ private func testStableHash() {
 
 private func testNotificationPayloadAndMapping() {
   check(
-    NotificationDatabaseReader.isWeChatNotificationIdentifier("com.tencent.xinWeChat"),
-    "Direct WeChat notification identifier"
+    NotificationDatabaseReader.isWeChatNotificationIdentifier("com.tencent.WeWorkMac"),
+    "Direct WeCom notification identifier"
   )
   check(
     NotificationDatabaseReader.isWeChatNotificationIdentifier(
-      "5A4RE8SF68.com.tencent.xinWeChat"
+      "88L2Q4487U.com.tencent.WeWorkMac"
     ),
-    "Team-prefixed WeChat notification identifier"
+    "Team-prefixed WeCom notification identifier"
   )
   check(
     NotificationDatabaseReader.isWeChatNotificationIdentifier(
-      "  5a4re8sf68.COM.TENCENT.XINWECHAT  \n"
+      "  88l2q4487u.COM.TENCENT.WEWORKMAC  \n"
     ),
     "Notification identifier should tolerate case and surrounding whitespace"
   )
   check(
     !NotificationDatabaseReader.isWeChatNotificationIdentifier(
-      "OTHERTEAM.com.tencent.xinWeChat"
+      "OTHERTEAM.com.tencent.WeWorkMac"
     ),
     "Unknown team-prefixed identifier must be rejected"
   )
   check(
-    !NotificationDatabaseReader.isWeChatNotificationIdentifier("com.example.WeChat"),
-    "Unrelated notification identifier must be rejected"
+    !NotificationDatabaseReader.isWeChatNotificationIdentifier("com.tencent.xinWeChat"),
+    "Personal WeChat notification identifier must be rejected"
   )
 
   let deliveredAt = Date(timeIntervalSince1970: 1_800_000_000)
+  guard let userData = try? NSKeyedArchiver.archivedData(
+    withRootObject: ["ct": NSNumber(value: 1)],
+    requiringSecureCoding: false
+  ) else {
+    failures.append("Could not create notification user-data fixture")
+    return
+  }
   let propertyList: [String: Any] = [
     "req": [
       "titl": "项目群",
       "subt": "张三",
       "body": "明天十点开会",
       "iden": "notification-1",
+      "usda": userData,
       "atta": [
         [
           "identifier": "image-1",
@@ -518,7 +585,9 @@ private func testNotificationPayloadAndMapping() {
     title: "项目群",
     subtitle: "",
     body: "李四：接口已上线",
-    identifier: "notification-2"
+    identifier: "notification-2",
+    conversationType: 1,
+    sourceIdentity: "fixture-prefixed-source"
   )
   let prefixedEvent = mapper.event(from: prefixedRecord, groups: ["项目群"])
   check(prefixedEvent?.senderDisplayName == "李四", "Sender prefix mapping")
@@ -531,13 +600,12 @@ private func testNotificationPayloadAndMapping() {
     title: "项目群",
     subtitle: "",
     body: "秋日的晚霞在群聊中@了你",
-    identifier: "notification-3"
+    identifier: "notification-3",
+    conversationType: 1
   )
-  let mentionEvent = mapper.event(from: mentionRecord, groups: ["项目群"])
-  check(mentionEvent?.senderDisplayName == "秋日的晚霞", "Mention notice sender mapping")
   check(
-    mentionEvent?.content == "秋日的晚霞在群聊中@了你",
-    "Mention notice content remains intact"
+    mapper.event(from: mentionRecord, groups: ["项目群"]) == nil,
+    "Ambiguous mention notice without a sender separator must fail closed"
   )
 
   let overlappingGroupsRecord = NotificationRecord(
@@ -547,7 +615,9 @@ private func testNotificationPayloadAndMapping() {
     title: "Alpha 1337",
     subtitle: "成员",
     body: "CA: 0x1111111111111111111111111111111111111111",
-    identifier: "notification-overlap"
+    identifier: "notification-overlap",
+    conversationType: 1,
+    sourceIdentity: "fixture-overlap-source"
   )
   check(
     mapper.event(from: overlappingGroupsRecord, groups: ["Alpha", "Alpha 1337"])?.group == "Alpha 1337",
@@ -567,11 +637,27 @@ private func testNotificationPayloadAndMapping() {
     title: "Alpha" + zeroWidthSpace + " 1337",
     subtitle: "张三",
     body: "零宽空格测试",
-    identifier: "notification-4"
+    identifier: "notification-4",
+    conversationType: 1
   )
   check(
-    mapper.event(from: invisibleSpacingRecord, groups: ["Alpha 1337"])?.group == "Alpha 1337",
-    "Group mapping should tolerate invisible and regular spaces"
+    mapper.event(from: invisibleSpacingRecord, groups: ["Alpha 1337"]) == nil,
+    "Group mapping must preserve invisible and regular internal spacing"
+  )
+
+  let directRecord = NotificationRecord(
+    rowID: 46,
+    uuid: nil,
+    deliveredAt: deliveredAt,
+    title: "项目群",
+    subtitle: "",
+    body: "张三：DIRECT_PRIVATE",
+    identifier: "notification-direct",
+    conversationType: 0
+  )
+  check(
+    mapper.event(from: directRecord, groups: ["项目群"]) == nil,
+    "Direct-chat ct must fail closed even with an exact group title"
   )
 }
 
@@ -723,6 +809,178 @@ private func testNotificationMonitorDatabaseReset() async {
   )
 }
 
+private func testNotificationMonitorSourceIdentityFingerprintRecovery() async {
+  let deliveredAt = Date(timeIntervalSince1970: 1_800_000_200)
+  let reader = FakeNotificationReader(
+    records: [
+      fixtureNotification(
+        rowID: 200,
+        uuid: nil,
+        body: "张三：跨源相同内容",
+        deliveredAt: deliveredAt,
+        sourceIdentity: "source-a"
+      )
+    ]
+  )
+  let collector = NotificationMonitorCollector()
+  let monitor = WeChatNotificationMonitor(
+    reader: reader,
+    groups: ["测试群"],
+    pollInterval: 0.02,
+    recentSweepInterval: 0.02,
+    watchesFileSystem: false,
+    onEvent: collector.receive,
+    onHealth: collector.receive
+  )
+  let task = Task { try await monitor.run() }
+
+  for _ in 0..<100 where collector.health.isEmpty {
+    try? await Task.sleep(for: .milliseconds(10))
+  }
+  guard !collector.health.isEmpty else {
+    task.cancel()
+    _ = try? await task.value
+    failures.append("Source fingerprint monitor should finish its initial baseline")
+    return
+  }
+  reader.replace(
+    records: [
+      fixtureNotification(
+        rowID: 200,
+        uuid: nil,
+        body: "张三：跨源相同内容",
+        deliveredAt: deliveredAt,
+        sourceIdentity: "source-b"
+      )
+    ]
+  )
+  for _ in 0..<100 where collector.events.isEmpty {
+    try? await Task.sleep(for: .milliseconds(10))
+  }
+  task.cancel()
+  _ = try? await task.value
+
+  check(
+    collector.events.count == 1,
+    "Recent sweep fingerprints should distinguish the same UUID-less row across sources"
+  )
+  check(
+    collector.events.first?.eventID
+      == StableHash.hex("notification|source:source-b|row:200"),
+    "Recent sweep should preserve the replacement source identity"
+  )
+}
+
+private func testNotificationMonitorSourceIdentityReset() async {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("wxfomo-monitor-source-\(UUID().uuidString)", isDirectory: true)
+  let databaseURL = directory.appendingPathComponent("db")
+  let replacementURL = directory.appendingPathComponent("replacement")
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  do {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("source-a".utf8).write(to: databaseURL)
+    try Data("source-b".utf8).write(to: replacementURL)
+    guard let firstIdentity = NotificationDatabaseReader.sourceIdentity(for: databaseURL) else {
+      failures.append("Monitor source reset fixture should have a first identity")
+      return
+    }
+    let deliveredAt = Date(timeIntervalSince1970: 1_800_000_200)
+    let reader = FakeNotificationReader(
+      records: [
+        fixtureNotification(
+          rowID: 200,
+          uuid: nil,
+          body: "张三：跨源同 rowID",
+          deliveredAt: deliveredAt,
+          sourceIdentity: firstIdentity
+        )
+      ],
+      databaseURL: databaseURL,
+      sourceIdentity: firstIdentity
+    )
+    let collector = NotificationMonitorCollector()
+    let monitor = WeChatNotificationMonitor(
+      reader: reader,
+      groups: ["测试群"],
+      pollInterval: 0.02,
+      recentSweepInterval: 0.02,
+      watchesFileSystem: false,
+      onEvent: collector.receive,
+      onHealth: collector.receive
+    )
+    let task = Task { try await monitor.run() }
+
+    for _ in 0..<100 where collector.health.isEmpty {
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    guard !collector.health.isEmpty else {
+      task.cancel()
+      _ = try? await task.value
+      failures.append("Source reset monitor should finish its initial baseline")
+      return
+    }
+    reader.replaceOnNextSourceIdentityObservation {
+      let renameResult = replacementURL.path.withCString { replacementPath in
+        databaseURL.path.withCString { databasePath in
+          Darwin.rename(replacementPath, databasePath)
+        }
+      }
+      guard renameResult == 0,
+        let resolvedIdentity = NotificationDatabaseReader.sourceIdentity(for: databaseURL)
+      else {
+        return (nil, [])
+      }
+      return (
+        resolvedIdentity,
+        [
+          fixtureNotification(
+            rowID: 200,
+            uuid: nil,
+            body: "张三：跨源同 rowID",
+            deliveredAt: deliveredAt,
+            sourceIdentity: resolvedIdentity
+          )
+        ]
+      )
+    }
+    for _ in 0..<100 {
+      if collector.events.count == 1,
+        collector.health.contains(where: { $0.databaseResetCount == 1 })
+      {
+        break
+      }
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    task.cancel()
+    _ = try? await task.value
+
+    guard let secondIdentity = NotificationDatabaseReader.sourceIdentity(for: databaseURL),
+      secondIdentity != firstIdentity
+    else {
+      failures.append("Monitor source reset fixture should atomically replace its inode")
+      return
+    }
+
+    check(
+      collector.events.count == 1,
+      "Source inode replacement should replay the same high row ID"
+    )
+    check(
+      collector.health.contains { $0.databaseResetCount == 1 },
+      "Source inode replacement should reset native monitor health/cursor state"
+    )
+    check(
+      collector.events.first?.eventID
+        == StableHash.hex("notification|source:\(secondIdentity)|row:200"),
+      "Source inode replacement should emit the new source-bound event ID"
+    )
+  } catch {
+    failures.append("Monitor source reset fixture threw: \(error.localizedDescription)")
+  }
+}
+
 private func testNotificationMonitorInPlaceUpdateRecovery() async {
   let original = fixtureNotification(rowID: 1, uuid: "updated-in-place", body: "张三：旧消息")
   let reader = FakeNotificationReader(records: [original])
@@ -751,6 +1009,406 @@ private func testNotificationMonitorInPlaceUpdateRecovery() async {
   check(
     collector.health.last?.updatedNotificationRecoveryCount == 1,
     "In-place update recovery health"
+  )
+}
+
+private func testNotificationMonitorInPlaceUpdatePersistsThroughMessageStore() async {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("wxfomo-monitor-store-update-\(UUID().uuidString)", isDirectory: true)
+  let databaseURL = directory.appendingPathComponent("messages.sqlite3")
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  do {
+    let deliveredAt = Date(timeIntervalSince1970: 1_800_000_200)
+    let original = fixtureNotification(
+      rowID: 44,
+      uuid: "same-native-uuid",
+      body: "张三：旧消息",
+      deliveredAt: deliveredAt
+    )
+    let updated = fixtureNotification(
+      rowID: 44,
+      uuid: "same-native-uuid",
+      subtitle: "李四",
+      body: "李四：[图片] 更新消息",
+      deliveredAt: deliveredAt.addingTimeInterval(10)
+    )
+    let expectedEventID = NotificationMapper().canonicalEventID(from: original)
+    let reader = FakeNotificationReader(records: [original])
+    let collector = NotificationMonitorCollector()
+    let store = try MessageStore(databaseURL: databaseURL)
+    let monitor = WeChatNotificationMonitor(
+      reader: reader,
+      groups: ["测试群"],
+      includeExisting: true,
+      pollInterval: 0.02,
+      recentSweepInterval: 0.02,
+      watchesFileSystem: false,
+      onEvent: { event in
+        collector.receive(event)
+        Task {
+          do {
+            let result = try await store.insert(event)
+            collector.receive(insertResult: result)
+          } catch {
+            collector.receive(error: error)
+          }
+        }
+      },
+      onHealth: collector.receive
+    )
+    let task = Task { try await monitor.run() }
+
+    var persistedOriginal = false
+    for _ in 0..<100 {
+      if let expectedEventID = expectedEventID,
+        (try? await store.messages(eventIDs: [expectedEventID]).first?.event.content) == "旧消息",
+        collector.insertResults == [.inserted]
+      {
+        persistedOriginal = true
+        break
+      }
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    guard persistedOriginal else {
+      task.cancel()
+      _ = try? await task.value
+      failures.append("Monitor-to-store fixture did not persist the original event before update")
+      return
+    }
+    let originalStored: StoredMessage?
+    if let expectedEventID = expectedEventID {
+      originalStored = try await store.messages(eventIDs: [expectedEventID]).first
+    } else {
+      originalStored = nil
+    }
+    guard let originalStored = originalStored else {
+      task.cancel()
+      _ = try? await task.value
+      failures.append("Monitor-to-store fixture could not reload the original stored event")
+      return
+    }
+    reader.replace(records: [updated])
+    for _ in 0..<100 {
+      if let expectedEventID = expectedEventID,
+        collector.events.count == 2,
+        (try? await store.messages(eventIDs: [expectedEventID]).first?.event.content)
+          == "[图片] 更新消息",
+        collector.insertResults == [.inserted, .updated]
+      {
+        break
+      }
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    reader.replace(records: [original])
+    try? await Task.sleep(for: .milliseconds(120))
+    task.cancel()
+    _ = try? await task.value
+
+    let stored: StoredMessage?
+    if let expectedEventID = expectedEventID {
+      stored = try? await store.messages(eventIDs: [expectedEventID]).first
+    } else {
+      stored = nil
+    }
+    let page = try await store.messages(matching: MessageQuery(limit: 10))
+    let statistics = try await store.statistics()
+    check(collector.errors.isEmpty, "Monitor-to-store update should not fail persistence")
+    check(collector.events.count == 2, "Same-UUID update should emit once after initial delivery")
+    check(
+      collector.insertResults == [.inserted, .updated],
+      "Same-UUID persistence should distinguish an update from an unchanged duplicate"
+    )
+    let consumptions = collector.insertResults.map(MessageEventConsumer.persisted)
+    check(
+      consumptions.map(\.displayUpdate) == [.reloadFromStore, .reloadFromStore],
+      "Initial and updated persistence should both refresh the displayed store state"
+    )
+    check(
+      consumptions.filter { $0.shouldRunNewMessageSideEffects }.count == 1,
+      "Same-UUID update should run sound and automation effects only for initial insert"
+    )
+    let updatedConsumption = MessageEventConsumer.persisted(.updated)
+    check(
+      updatedConsumption.displayUpdate == .reloadFromStore,
+      "Persisted same-ID update should reload the displayed message"
+    )
+    check(
+      !updatedConsumption.shouldRunNewMessageSideEffects,
+      "Persisted same-ID update must not trigger new-message side effects"
+    )
+    check(
+      collector.events.allSatisfy { $0.eventID == expectedEventID },
+      "Same-UUID update should retain one canonical event ID"
+    )
+    check(page.messages.count == 1, "Same-UUID update must not create a duplicate store row")
+    check(statistics.capturedCount == 1, "Same-UUID update must not increment message counts")
+    check(stored?.storageID == originalStored.storageID, "Same-UUID update should retain storage ID")
+    check(stored?.insertedAt == originalStored.insertedAt, "Same-UUID update should retain insertedAt")
+    check(stored?.event.group == originalStored.event.group, "Same-UUID update should retain group")
+    check(stored?.event.senderDisplayName == "李四", "Same-UUID update should persist sender")
+    check(stored?.event.content == "[图片] 更新消息", "Same-UUID update should persist content")
+    check(stored?.event.messageType == .media, "Same-UUID update should persist message type")
+    check(stored?.event.observedAt == updated.deliveredAt, "Same-UUID update should persist observation time")
+    check(stored?.event.sourceSequence == 44, "Same-UUID update should persist source sequence")
+    check(stored?.event.attachments.isEmpty == true, "Same-UUID update should persist attachments")
+    check(
+      stored?.event.senderConfidence == .notificationPayload && stored?.event.isFromSelf == false,
+      "Same-UUID update should persist provenance fields"
+    )
+    check(
+      collector.health.last?.updatedNotificationRecoveryCount == 1,
+      "A-to-B-to-A fingerprint rollback should keep exactly one recovery"
+    )
+  } catch {
+    failures.append("Monitor-to-store in-place update self-test threw: \(error.localizedDescription)")
+  }
+}
+
+private func testMessageEventConsumerNoStoreFallback() {
+  check(
+    MessageEventConsumer.persisted(.inserted)
+      == MessageEventConsumption(
+        displayUpdate: .reloadFromStore,
+        shouldRunNewMessageSideEffects: true
+      ),
+    "Persisted insert should refresh display and retain new-message side effects"
+  )
+  check(
+    MessageEventConsumer.persisted(.existing)
+      == MessageEventConsumption(
+        displayUpdate: .unchanged,
+        shouldRunNewMessageSideEffects: false
+      ),
+    "Unchanged duplicate should neither refresh display nor run new-message side effects"
+  )
+
+  let original = fixtureMessageEvent(
+    id: "fallback-same-id",
+    sender: "张三",
+    content: "旧消息",
+    observedAt: Date(timeIntervalSince1970: 1_900_000_100),
+    sequence: 10
+  )
+  let updated = fixtureMessageEvent(
+    id: "fallback-same-id",
+    sender: "李四",
+    content: "更新消息",
+    observedAt: Date(timeIntervalSince1970: 1_900_000_110),
+    sequence: 10
+  )
+  let updateConsumption = MessageEventConsumer.withoutStore(
+    updated,
+    displayedMessages: [original]
+  )
+  check(
+    updateConsumption.displayUpdate == .replaceInMemory([updated]),
+    "No-store same-ID update should replace the displayed event"
+  )
+  check(
+    !updateConsumption.shouldRunNewMessageSideEffects,
+    "No-store same-ID update must not trigger new-message side effects"
+  )
+  check(
+    updateConsumption.representsMessageUpdate,
+    "No-store same-ID replacement should report a message update"
+  )
+
+  let equalTimeUpdate = fixtureMessageEvent(
+    id: "fallback-same-id",
+    sender: "王五",
+    content: "同时间更新消息",
+    observedAt: original.observedAt,
+    sequence: 11
+  )
+  let equalTimeConsumption = MessageEventConsumer.withoutStore(
+    equalTimeUpdate,
+    displayedMessages: [original]
+  )
+  check(
+    equalTimeConsumption.displayUpdate == .replaceInMemory([equalTimeUpdate]),
+    "No-store changed event at the same observation time should replace the displayed event"
+  )
+  check(
+    !equalTimeConsumption.shouldRunNewMessageSideEffects,
+    "No-store equal-time update must not trigger new-message side effects"
+  )
+  check(
+    equalTimeConsumption.representsMessageUpdate,
+    "No-store changed equal-time event should report a message update"
+  )
+
+  let identicalConsumption = MessageEventConsumer.withoutStore(
+    original,
+    displayedMessages: [original]
+  )
+  check(
+    identicalConsumption.displayUpdate == .unchanged,
+    "No-store identical event should leave the displayed event unchanged"
+  )
+  check(
+    !identicalConsumption.shouldRunNewMessageSideEffects,
+    "No-store identical event must not trigger new-message side effects"
+  )
+  check(
+    !identicalConsumption.representsMessageUpdate,
+    "No-store identical event must not report a message update"
+  )
+
+  let older = fixtureMessageEvent(
+    id: "fallback-same-id",
+    sender: "王五",
+    content: "迟到的旧消息",
+    observedAt: Date(timeIntervalSince1970: 1_900_000_090),
+    sequence: 9
+  )
+  let olderConsumption = MessageEventConsumer.withoutStore(
+    older,
+    displayedMessages: [original]
+  )
+  check(
+    olderConsumption.displayUpdate == .unchanged,
+    "No-store older same-ID event should not replace a newer displayed event"
+  )
+  check(
+    !olderConsumption.shouldRunNewMessageSideEffects,
+    "No-store older same-ID event must not trigger new-message side effects"
+  )
+  check(
+    !olderConsumption.representsMessageUpdate,
+    "No-store older same-ID event must not report a message update"
+  )
+
+  let crossGroup = fixtureMessageEvent(
+    id: "fallback-same-id",
+    group: "其他群",
+    sender: "赵六",
+    content: "跨群更新",
+    observedAt: Date(timeIntervalSince1970: 1_900_000_120),
+    sequence: 12
+  )
+  let crossGroupConsumption = MessageEventConsumer.withoutStore(
+    crossGroup,
+    displayedMessages: [original]
+  )
+  check(
+    crossGroupConsumption.displayUpdate == .unchanged,
+    "No-store cross-group same-ID event should fail closed"
+  )
+  check(
+    !crossGroupConsumption.shouldRunNewMessageSideEffects,
+    "No-store cross-group same-ID event must not trigger new-message side effects"
+  )
+  check(
+    !crossGroupConsumption.representsMessageUpdate,
+    "No-store cross-group same-ID event must not report a message update"
+  )
+
+  let newEvent = fixtureMessageEvent(
+    id: "fallback-new-id",
+    sender: "王五",
+    content: "新消息",
+    observedAt: Date(timeIntervalSince1970: 1_900_000_120),
+    sequence: 11
+  )
+  let newConsumption = MessageEventConsumer.withoutStore(
+    newEvent,
+    displayedMessages: [updated]
+  )
+  check(
+    newConsumption.displayUpdate == .replaceInMemory([newEvent, updated]),
+    "No-store new event should append and retain display ordering"
+  )
+  check(
+    newConsumption.shouldRunNewMessageSideEffects,
+    "No-store new event should retain new-message side effects"
+  )
+}
+
+private func testNotificationMonitorReusedLowerRowIDRecovery() async {
+  let crowdedBaseline = (100...200).map {
+    fixtureNotification(rowID: Int64($0), uuid: "existing-high-row-\($0)")
+  }
+  let reader = FakeNotificationReader(records: crowdedBaseline)
+  let collector = NotificationMonitorCollector()
+  let monitor = WeChatNotificationMonitor(
+    reader: reader,
+    groups: ["测试群"],
+    pollInterval: 0.02,
+    recentSweepInterval: 0.02,
+    watchesFileSystem: false,
+    onEvent: collector.receive,
+    onHealth: collector.receive
+  )
+  let task = Task { try await monitor.run() }
+
+  try? await Task.sleep(for: .milliseconds(40))
+  reader.append(
+    fixtureNotification(
+      rowID: 2,
+      uuid: "reused-lower-row",
+      body: "李四：低序号新消息",
+      deliveredAt: Date(timeIntervalSince1970: 1_800_001_000)
+    )
+  )
+  try? await Task.sleep(for: .milliseconds(120))
+  task.cancel()
+  _ = try? await task.value
+
+  check(collector.events.count == 1, "Recent sweep should recover a reused lower row ID")
+  check(collector.events.first?.content == "低序号新消息", "Recovered lower row content")
+  check(collector.health.last?.scannedRecordCount == 1, "Lower row ID scanned count")
+  check(
+    collector.health.last?.identifiedWeChatNotificationCount == 1,
+    "Lower row ID identified count"
+  )
+  check(collector.health.last?.decodedNotificationCount == 1, "Lower row ID decoded count")
+  check(
+    collector.health.last?.groupMatchedNotificationCount == 1,
+    "Lower row ID group-match count"
+  )
+  check(
+    collector.health.last?.updatedNotificationRecoveryCount == 1,
+    "Lower row ID recovery health"
+  )
+}
+
+private func testNotificationMonitorLowerRowIDMismatchDiagnosis() async {
+  let reader = FakeNotificationReader(
+    records: [fixtureNotification(rowID: 10, uuid: "existing-high-row")]
+  )
+  let collector = NotificationMonitorCollector()
+  let monitor = WeChatNotificationMonitor(
+    reader: reader,
+    groups: ["其他群"],
+    pollInterval: 0.02,
+    recentSweepInterval: 0.02,
+    watchesFileSystem: false,
+    onEvent: collector.receive,
+    onHealth: collector.receive
+  )
+  let task = Task { try await monitor.run() }
+
+  try? await Task.sleep(for: .milliseconds(40))
+  reader.append(fixtureNotification(rowID: 2, uuid: "lower-unmatched-row"))
+  try? await Task.sleep(for: .milliseconds(120))
+  task.cancel()
+  _ = try? await task.value
+
+  check(collector.events.isEmpty, "Lower unmatched row must not emit")
+  check(collector.health.last?.scannedRecordCount == 1, "Lower unmatched scanned count")
+  check(
+    collector.health.last?.identifiedWeChatNotificationCount == 1,
+    "Lower unmatched identified count"
+  )
+  check(collector.health.last?.decodedNotificationCount == 1, "Lower unmatched decoded count")
+  check(
+    collector.health.last?.unmatchedGroupNotificationCount == 1,
+    "Lower unmatched group diagnosis"
+  )
+  check(
+    collector.health.last?.latestActivity == .groupNotMonitored,
+    "Lower unmatched latest activity"
   )
 }
 
@@ -4088,10 +4746,16 @@ testSequenceDelta()
 testStableHash()
 testNotificationPayloadAndMapping()
 testMessageEventOrdering()
+testMessageEventConsumerNoStoreFallback()
 testOCRGeometryExtraction()
 await testNotificationMonitorRecovery()
 await testNotificationMonitorDatabaseReset()
+await testNotificationMonitorSourceIdentityFingerprintRecovery()
+await testNotificationMonitorSourceIdentityReset()
 await testNotificationMonitorInPlaceUpdateRecovery()
+await testNotificationMonitorInPlaceUpdatePersistsThroughMessageStore()
+await testNotificationMonitorReusedLowerRowIDRecovery()
+await testNotificationMonitorLowerRowIDMismatchDiagnosis()
 await testNotificationMonitorGroupMismatchDiagnosis()
 await testMessageStorePersistence()
 await testMessageFlowAnalytics()

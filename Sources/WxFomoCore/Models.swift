@@ -187,12 +187,14 @@ public struct DoctorReport: Equatable, Sendable {
 public struct NotificationRecord: Equatable, Sendable {
   public let rowID: Int64
   public let uuid: String?
+  public let sourceIdentity: String?
   public let deliveredAt: Date
   public let title: String
   public let subtitle: String
   public let body: String
   public let identifier: String
   public let attachments: [MessageAttachment]
+  public let conversationType: Int?
 
   public init(
     rowID: Int64,
@@ -202,16 +204,20 @@ public struct NotificationRecord: Equatable, Sendable {
     subtitle: String,
     body: String,
     identifier: String,
-    attachments: [MessageAttachment] = []
+    attachments: [MessageAttachment] = [],
+    conversationType: Int? = nil,
+    sourceIdentity: String? = nil
   ) {
     self.rowID = rowID
     self.uuid = uuid
+    self.sourceIdentity = sourceIdentity
     self.deliveredAt = deliveredAt
     self.title = title
     self.subtitle = subtitle
     self.body = body
     self.identifier = identifier
     self.attachments = attachments
+    self.conversationType = conversationType
   }
 }
 

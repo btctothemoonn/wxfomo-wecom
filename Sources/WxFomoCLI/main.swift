@@ -73,7 +73,7 @@ private struct CLI {
     }
 
     let records = try notificationReader.recentRecords(limit: limit)
-    print("最近微信通知：\(records.count)")
+    print("最近企业微信通知：\(records.count)")
     for record in records {
       print(
         "rowid=\(record.rowID) delivered=\(ISO8601DateFormatter().string(from: record.deliveredAt))"
@@ -239,9 +239,9 @@ private struct CLI {
       }
     }
     let report = reader.doctor(promptForPermission: prompt)
-    print("微信安装：\(report.weChatInstalled ? "是" : "否")")
-    print("微信版本：\(report.weChatVersion ?? "未知")")
-    print("微信运行：\(report.weChatRunning ? "是" : "否")")
+    print("企业微信安装：\(report.weChatInstalled ? "是" : "否")")
+    print("企业微信版本：\(report.weChatVersion ?? "未知")")
+    print("企业微信运行：\(report.weChatRunning ? "是" : "否")")
     print("辅助功能权限：\(report.accessibilityTrusted ? "已授权" : "未授权")")
     print("屏幕捕获权限：\(report.screenCaptureTrusted ? "已授权" : "未授权")")
     let availability = notificationReader.availability()
@@ -270,7 +270,7 @@ private struct CLI {
       if activity < 0 {
         print("系统日志检查：不可用")
       } else {
-        print("最近 2 小时系统收到的微信通知活动：\(activity) 条")
+        print("最近 2 小时系统收到的企业微信通知活动：\(activity) 条")
       }
     }
   }
@@ -286,7 +286,7 @@ private struct CLI {
       "--style",
       "compact",
       "--predicate",
-      #"process == "usernoted" AND eventMessage CONTAINS[c] "xinWeChat""#,
+      #"process == "usernoted" AND eventMessage CONTAINS[c] "weworkmac""#,
     ]
     let pipe = Pipe()
     process.standardOutput = pipe
@@ -363,10 +363,10 @@ private struct CLI {
       print("  [\(app.table)] \(app.identifier): \(app.count)")
     }
     print("record 总数：\(diagnostics.totalRecordCount)，最大 rowid：\(diagnostics.maxRowID)")
-    print("微信记录总数（record 表）：\(diagnostics.weChatRecordCount)")
+    print("企业微信记录总数（record 表）：\(diagnostics.weChatRecordCount)")
     let decodedCount = diagnostics.samples.filter(\.decoded).count
     print(
-      "最近微信记录样本：\(diagnostics.samples.count)，解码成功 \(decodedCount)，"
+      "最近企业微信记录样本：\(diagnostics.samples.count)，解码成功 \(decodedCount)，"
         + "失败 \(diagnostics.samples.count - decodedCount)"
     )
     let formatter = ISO8601DateFormatter()
@@ -394,7 +394,7 @@ private struct CLI {
     if let watchSeconds {
       print("")
       print("开始观察 \(watchSeconds) 秒（每 0.25 秒扫描一次各表新增行，并实时跟踪系统日志）。")
-      print("请让本机微信留在后台，然后用另一台设备在群里发测试消息…")
+      print("请让本机企业微信留在后台，然后用另一账号在指定群里发测试消息…")
       print("")
 
       let logProcess = Process()
@@ -405,7 +405,7 @@ private struct CLI {
         "--style",
         "compact",
         "--predicate",
-        #"process == "usernoted" AND eventMessage CONTAINS[c] "xinWeChat""#,
+        #"process == "usernoted" AND eventMessage CONTAINS[c] "weworkmac""#,
       ]
       let logPipe = Pipe()
       logProcess.standardOutput = logPipe
@@ -447,7 +447,7 @@ private struct CLI {
           for sample in samples {
             let marked =
               NotificationDatabaseReader.isWeChatNotificationIdentifier(sample.identifier)
-              ? "★微信"
+              ? "★企业微信"
               : "·其他"
             print(
               "[db] [\(sample.table)] \(marked) rowid=\(sample.rowID) app=\(sample.identifier) "
@@ -650,7 +650,7 @@ private struct CLI {
   private func printUsage() {
     print(
       """
-      wxFomo - macOS 微信群只读消息监听器
+      wxFomo - macOS 企业微信群只读消息监听器
 
       用法：
         wxfomo doctor [--prompt] [--open-settings] [--deep]
@@ -669,14 +669,14 @@ private struct CLI {
       doctor 选项：
         --prompt             触发辅助功能权限申请
         --open-settings      打开“完全磁盘访问”设置面板
-        --deep               追加检查系统日志中的微信通知投递活动
+        --deep               追加检查系统日志中的企业微信通知投递活动
 
       notification-dump 输出通知数据库各表结构、各表行数与各 app 通知数量、
-      微信记录解码统计和最近样本；默认脱敏，--show-text 显示原文。
-      --watch 进入实时观察：每秒扫描各表新增行，用于确认微信通知行落在哪张表。
+      企业微信记录解码统计和最近样本；默认脱敏，--show-text 显示原文。
+      --watch 进入实时观察：每秒扫描各表新增行，用于确认企业微信通知行落在哪张表。
 
-      listen 监听 macOS Notification Center 的微信新增通知，不使用 OCR。
-      ocr-listen 是窗口 OCR 补漏模式，不会点击、输入或发送微信消息。
+      listen 监听 macOS Notification Center 的企业微信新增通知，不使用 OCR。
+      ocr-listen 是旧版个人微信窗口 OCR 补漏模式，不属于企业微信通知链路。
       """
     )
   }

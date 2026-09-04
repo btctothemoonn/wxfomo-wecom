@@ -135,14 +135,17 @@ public final class WeChatNotificationMonitor {
   private var emittedEventIDs = Set<String>()
   private var emittedEventIDOrder: [String] = []
   private let emittedEventIDLimit = 10_000
+  private var observedRecordFingerprints = Set<String>()
+  private var observedRecordFingerprintOrder: [String] = []
+  private let observedRecordFingerprintLimit = 10_000
 
   public init(
     reader: NotificationRecordReading = NotificationDatabaseReader(),
     mapper: NotificationMapper = NotificationMapper(),
     groups: [String],
     includeExisting: Bool = false,
-    pollInterval: TimeInterval = 1.0,
-    recentSweepInterval: TimeInterval = 2.0,
+    pollInterval: TimeInterval = 0.1,
+    recentSweepInterval: TimeInterval = 0.1,
     recentSweepLimit: Int = 100,
     watchesFileSystem: Bool = true,
     onEvent: @escaping EventSink,
@@ -165,6 +168,7 @@ public final class WeChatNotificationMonitor {
   public func run() async throws {
     guard !groups.isEmpty else { throw MonitorError.noGroups }
     let startedAt = Date()
+    var currentSourceIdentity = reader.sourceIdentity
     var lastRowID = try reader.latestRowID()
     var scannedRecordCount = 0
     var identifiedWeChatNotificationCount = 0
@@ -185,6 +189,7 @@ public final class WeChatNotificationMonitor {
     do {
       let baselineRecords = try reader.recentRecords(limit: recentSweepLimit)
       for record in baselineRecords {
+        rememberRecord(record)
         guard let event = mapper.event(from: record, groups: groups) else { continue }
         if includeExisting {
           if emitIfNew(event) { matchedEventCount += 1 }
@@ -233,6 +238,17 @@ public final class WeChatNotificationMonitor {
     for await _ in events {
       if Task.isCancelled { break }
       do {
+        if let observedSourceIdentity = reader.sourceIdentity {
+          if let currentSourceIdentity = currentSourceIdentity,
+            observedSourceIdentity != currentSourceIdentity
+          {
+            databaseResetCount += 1
+            lastRowID = 0
+            hasRecentBaseline = false
+            onLog("通知数据库来源已更换，已从新数据库起点补扫")
+          }
+          currentSourceIdentity = observedSourceIdentity
+        }
         let latestRowID = try reader.latestRowID()
         if latestRowID < lastRowID {
           databaseResetCount += 1
@@ -247,6 +263,7 @@ public final class WeChatNotificationMonitor {
           decodedNotificationCount += batch.records.count
           var batchGroupMatchedCount = 0
           for record in batch.records {
+            rememberRecord(record)
             if let event = mapper.event(from: record, groups: groups) {
               batchGroupMatchedCount += 1
               if emitIfNew(event) { matchedEventCount += 1 }
@@ -273,15 +290,25 @@ public final class WeChatNotificationMonitor {
           let recentRecords = try reader.recentRecords(limit: recentSweepLimit)
           if hasRecentBaseline {
             for record in recentRecords {
-              guard let event = mapper.event(from: record, groups: groups) else { continue }
-              if emitIfNew(event) {
+              guard rememberRecord(record) else { continue }
+              scannedRecordCount += 1
+              identifiedWeChatNotificationCount += 1
+              decodedNotificationCount += 1
+              guard let event = mapper.event(from: record, groups: groups) else {
+                unmatchedGroupNotificationCount += 1
+                latestActivity = .groupNotMonitored
+                lastDatabaseActivityAt = sweepAt
+                continue
+              }
+              groupMatchedNotificationCount += 1
+              if emitRecoveredUpdate(event) {
                 recoveredUpdates += 1
                 matchedEventCount += 1
-                groupMatchedNotificationCount += 1
               }
             }
           } else {
             for record in recentRecords {
+              rememberRecord(record)
               guard let event = mapper.event(from: record, groups: groups) else { continue }
               if includeExisting {
                 if emitIfNew(event) { matchedEventCount += 1 }
@@ -296,7 +323,7 @@ public final class WeChatNotificationMonitor {
             updatedNotificationRecoveryCount += recoveredUpdates
             lastDatabaseActivityAt = sweepAt
             latestActivity = .matchedGroup
-            onLog("尾部补扫捕获 \(recoveredUpdates) 条原地更新的微信通知")
+            onLog("尾部补扫捕获 \(recoveredUpdates) 条企业微信短时通知或原地更新")
           }
         }
 
@@ -375,6 +402,13 @@ public final class WeChatNotificationMonitor {
   }
 
   @discardableResult
+  private func emitRecoveredUpdate(_ event: MessageEvent) -> Bool {
+    _ = remember(event)
+    onEvent(event)
+    return true
+  }
+
+  @discardableResult
   private func remember(_ event: MessageEvent) -> Bool {
     guard emittedEventIDs.insert(event.eventID).inserted else { return false }
     emittedEventIDOrder.append(event.eventID)
@@ -383,6 +417,21 @@ public final class WeChatNotificationMonitor {
       let removed = Array(emittedEventIDOrder.prefix(removeCount))
       emittedEventIDOrder.removeFirst(removeCount)
       for eventID in removed { emittedEventIDs.remove(eventID) }
+    }
+    return true
+  }
+
+  @discardableResult
+  private func rememberRecord(_ record: NotificationRecord) -> Bool {
+    let fingerprint = StableHash.notificationRecordFingerprint(record)
+    guard observedRecordFingerprints.insert(fingerprint).inserted else { return false }
+    observedRecordFingerprintOrder.append(fingerprint)
+    if observedRecordFingerprintOrder.count > observedRecordFingerprintLimit {
+      let overflow = observedRecordFingerprintOrder.count - observedRecordFingerprintLimit
+      for expired in observedRecordFingerprintOrder.prefix(overflow) {
+        observedRecordFingerprints.remove(expired)
+      }
+      observedRecordFingerprintOrder.removeFirst(overflow)
     }
     return true
   }

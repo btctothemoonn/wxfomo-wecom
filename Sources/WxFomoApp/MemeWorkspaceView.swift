@@ -1047,7 +1047,7 @@ struct MemeWorkspaceView: View {
       Label("数据边界", systemImage: "info.circle.fill")
         .font(.headline)
         .foregroundStyle(.primary)
-      Text("群聊统计仅基于本机已采集通知，不代表微信群完整消息流。\(report.marketDataSource.localizedTitle) 行情是 \(report.fetchedAt.formatted(date: .abbreviated, time: .standard)) 的外部快照，不构成代币身份保证或投资建议。")
+      Text("群聊统计仅基于本机已采集通知，不代表企业微信群完整消息流。\(report.marketDataSource.localizedTitle) 行情是 \(report.fetchedAt.formatted(date: .abbreviated, time: .standard)) 的外部快照，不构成代币身份保证或投资建议。")
         .font(.caption)
         .foregroundStyle(.secondary)
       if report.isCached {

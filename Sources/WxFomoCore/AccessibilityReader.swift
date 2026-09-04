@@ -134,7 +134,7 @@ public final class WeChatAccessibilityReader {
 
   public func doctor(promptForPermission: Bool = false) -> DoctorReport {
     let applicationURL = NSWorkspace.shared.urlForApplication(
-      withBundleIdentifier: Self.bundleIdentifier
+      withBundleIdentifier: WeComNotificationPolicy.applicationBundleIdentifier
     )
     let version =
       applicationURL
@@ -162,7 +162,9 @@ public final class WeChatAccessibilityReader {
       screenCaptureTrusted: screenCaptureTrusted,
       notificationDatabaseReadable: NotificationDatabaseReader().isReadable,
       weChatInstalled: applicationURL != nil,
-      weChatRunning: runningWeChat() != nil,
+      weChatRunning: !NSRunningApplication.runningApplications(
+        withBundleIdentifier: WeComNotificationPolicy.applicationBundleIdentifier
+      ).isEmpty,
       weChatVersion: version
     )
   }
