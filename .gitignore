@@ -1,0 +1,8 @@
+/.build/
+/dist/
+/.swiftpm/
+/.worktrees/
+/.DS_Store
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
