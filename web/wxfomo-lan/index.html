@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>wxFomo · 群消息总结</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <section id="login-view" class="login-view" aria-labelledby="login-title">
+      <form id="token-form" class="login-card" autocomplete="off">
+        <div class="brand-mark brand-mark-large" aria-hidden="true">W</div>
+        <p class="eyebrow">局域网只读工作台</p>
+        <h1 id="login-title">连接 wxFomo</h1>
+        <p class="login-copy">请输入 Mac 端已配置的访问密码。密码只保留在当前浏览器窗口中。</p>
+        <label class="field-label" for="token-input">访问密码</label>
+        <input
+          id="token-input"
+          class="token-input"
+          name="token"
+          type="password"
+          autocomplete="off"
+          autocapitalize="none"
+          spellcheck="false"
+          required
+        >
+        <button class="primary-button" type="submit">进入只读工作台</button>
+        <p id="login-error" class="form-error" role="alert" aria-live="polite"></p>
+        <p class="security-note">关闭此窗口即清除密码 · 不会写入 Mac 数据</p>
+      </form>
+    </section>
+
+    <div id="app-shell" class="app-shell" hidden></div>
+    <script type="module" src="/app.mjs"></script>
+  </body>
+</html>
