@@ -18,11 +18,9 @@ import {
   isCurrentReadOnlyRequest,
   readOnlyPageFromHash,
   renderAlerts,
-  renderAutomations,
-  renderMeme,
+  renderAnalyses,
   renderPriority,
   renderRules,
-  renderTrading,
 } from "../web/wxfomo-lan/pages.mjs";
 
 const {
@@ -37,6 +35,7 @@ const {
   invalidateListenerFreshness,
   listenerPresentation,
   mergeNewMessages,
+  normalizeReadOnlyPayload,
   prepareMessageReload,
   retainMessageBootstrap,
   retainReadOnlyPayload,
@@ -117,6 +116,13 @@ class FakeNode {
     return null;
   }
 
+  querySelectorAll(selector) {
+    if (selector.startsWith("[") && selector.endsWith("]")) {
+      return descendants(this).filter(node => node.getAttribute(selector.slice(1, -1)) !== null);
+    }
+    return descendants(this).filter(node => node.tagName === selector.toUpperCase());
+  }
+
   focus() {}
 
   click() {
@@ -185,8 +191,7 @@ function testWorkspaceRegistryHasExactReadOnlyCoverage() {
   assert.deepStrictEqual(
     WORKSPACE_PAGES.map((page) => page.id),
     [
-      "meme", "market", "analyses", "rules", "trading", "automations",
-      "sounds", "providers", "diagnostics",
+      "analyses", "rules", "providers", "diagnostics",
     ]
   );
   for (const page of WORKSPACE_PAGES) {
@@ -216,7 +221,7 @@ function testUnavailablePagesUseCanonicalCopyAndNeverRenderWriteActions() {
   }
 }
 
-function testProviderPageDisplaysOnlyNamesBooleansAndFixedMask() {
+function testProviderPageDisplaysOnlyMiniMaxConfigurationState() {
   const providerPage = WORKSPACE_PAGES.find((page) => page.id === "providers");
   const root = fakeRoot();
   providerPage.render({
@@ -225,15 +230,18 @@ function testProviderPageDisplaysOnlyNamesBooleansAndFixedMask() {
       available: true,
       aiConfigured: true,
       speechConfigured: false,
-      providerNames: ["OpenAI Compatible"],
+      providerNames: ["UNTRUSTED_PROVIDER_NAME"],
       tradingConfigured: false,
       secret: "NEVER_EXPOSE_THIS",
+      credentialRevision: "NEVER_EXPOSE_REVISION",
     },
     api: {},
   });
-  assert.ok(root.textContent.includes("OpenAI Compatible"));
-  assert.ok(root.textContent.includes("••••••••"));
+  assert.ok(root.textContent.includes("MiniMax-M2.7"));
+  assert.ok(root.textContent.includes("已配置"));
+  assert.ok(!root.textContent.includes("UNTRUSTED_PROVIDER_NAME"));
   assert.ok(!root.textContent.includes("NEVER_EXPOSE_THIS"));
+  assert.ok(!root.textContent.includes("NEVER_EXPOSE_REVISION"));
 }
 
 function testSourceLinkAcceptsOnlyHttpsAndUsesSafeRelationship() {
@@ -338,6 +346,82 @@ function testPriorityPageIsSeparateReadOnlyRouteWithCanonicalUnavailableCopy() {
   );
 }
 
+function testRuleAnnotationsRenderWithoutWriteControls() {
+  const root = fakeRoot();
+  renderPriority({
+    root,
+    payload: { available: true, items: [{
+      content: "rug 加仓", group: "甲群", sender: "阿甲",
+      observedAt: "2026-09-04T00:00:00Z", tags: ["高风险", "资金信号"],
+      priority: 50, severity: "critical",
+    }] },
+    api: {},
+  });
+  assert.ok(root.textContent.includes("高风险"));
+  assert.ok(root.textContent.includes("优先级 50"));
+  assert.strictEqual(descendants(root).filter((node) => node.attributes["data-write-action"]).length, 0);
+}
+
+function testAnalysisReportsRenderCadenceWindowsSourcesAndReadOnlyStates() {
+  const root = fakeRoot();
+  renderAnalyses({
+    root,
+    payload: { available: true, items: [{
+      jobId: "job-1", cadence: "two_hour", state: "credential_required",
+      windowStart: "2026-09-04T00:00:00Z", windowEnd: "2026-09-04T02:00:00Z",
+      attempt: 1, maximumAttempts: 3, nextAttemptAt: "2026-09-04T02:05:00Z",
+      summary: "两小时总结", summarySourceMessageIDs: ["event-a"],
+      topics: [{ title: "主题", summary: "主题摘要", sourceMessageIDs: ["event-a"] }],
+      findings: [{ category: "risk", epistemicStatus: "fact", text: "风险发现", sourceMessageIDs: ["event-a"] }],
+      cryptoAddresses: [{ address: "0xCA", contextSummary: "CA 上下文", epistemicStatus: "inference", sourceMessageIDs: ["event-a"] }],
+      crossGroupCA: { sourcesComplete: false, total: 2, items: [{
+        address: "0xCA", network: "base", groupNames: ["甲群", "乙群"], groupCount: 2,
+        mentionCount: 3, uniqueStatementCount: 2, duplicateCount: 1, speakerCount: 2,
+        speakers: ["阿甲", "阿乙"], summary: "CA 上下文", sourceMessageIDs: ["event-a"],
+      }, { address: "0xUNKNOWN", network: "unknown", groupCount: 1, mentionCount: 1,
+        uniqueStatementCount: 1, duplicateCount: 0, sourceMessageIDs: ["event-a"] }] },
+      sourceMessages: [{ eventId: "event-a", group: "甲群", sender: "阿甲", content: "完整来源正文",
+        relaySender: "搬运机器人", originalContent: "阿甲: <img src=x onerror=alert(1)>完整来源正文" }],
+    }, {
+      jobId: "job-2", cadence: "six_hour", state: "retry_wait",
+      windowStart: "2026-09-04T00:00:00Z", windowEnd: "2026-09-04T06:00:00Z",
+    }, {
+      jobId: "job-3", cadence: "daily", state: "succeeded",
+      windowStart: "2026-09-03T00:00:00Z", windowEnd: "2026-09-04T00:00:00Z",
+    }] },
+    api: {},
+  });
+  for (const expected of [
+    "2 小时", "6 小时", "24 小时", "需要配置凭据", "等待重试", "[", ")",
+    "主题", "风险发现", "0xCA", "完整来源正文", "总结来源 event-a",
+    "经 搬运机器人 转发", "阿甲: <img src=x onerror=alert(1)>完整来源正文",
+    "跨群 CA", "2 群 · 3 条提及 · 2 条去重发言 · 1 条重复传播", "甲群、乙群",
+    "链待确认，暂不跨群合并", "部分原文不可用", "来源示例", "未生成单独的 AI 摘要",
+  ]) {
+    assert.ok(root.textContent.includes(expected), expected);
+  }
+  assert.strictEqual(descendants(root).filter((node) => node.attributes["data-write-action"]).length, 0);
+  assert.strictEqual(descendants(root).filter((node) => node.tagName === "IMG").length, 0);
+  assert.ok(descendants(root).some((node) => node.tagName === "DETAILS"));
+}
+
+function testAnalysisPayloadNormalizesLegacySummarySources() {
+  const payload = normalizeReadOnlyPayload("analyses", {
+    available: true,
+    items: [{ summary: "旧摘要", sourceReferences: ["legacy-event"] }],
+  });
+  assert.deepStrictEqual(payload.items[0].summarySourceMessageIDs, ["legacy-event"]);
+}
+
+function testCAUnresolvedSourcesAreNotReportedAsMissingAI() {
+  const root = fakeRoot();
+  renderAnalyses({root, api: {}, payload: {available: true, items: [{jobId: "one", summary: "已有报告",
+    crossGroupCA: {sourcesComplete: true, total: 1, items: [{address: "0xCA", network: "unknown",
+      summaryUnavailableReason: "unresolved_sources", sourceMessageIDs: []}]}}]}});
+  assert.ok(root.textContent.includes("引用暂不能唯一关联"));
+  assert.ok(!root.textContent.includes("未生成单独的 AI 摘要"));
+}
+
 function testAvailablePagesIgnoreSecretsPathsAndWriteControls() {
   const payloads = {
     meme: { available: true, items: [{ symbol: "SAFE", network: "base" }] },
@@ -357,7 +441,7 @@ function testAvailablePagesIgnoreSecretsPathsAndWriteControls() {
     },
     diagnostics: {
       available: true,
-      sources: { messages: { available: true }, workspace: { available: false } },
+      sources: { messages: { available: true }, analysis: { available: false } },
       databasePath: "/Users/private/workspace.sqlite3",
       retriableErrors: ["source_locked", "/Users/private/error"],
     },
@@ -415,28 +499,6 @@ function testAlertTabsFilterPendingAndAllRecords() {
   assert.ok(root.textContent.includes("已确认提醒"));
 }
 
-function testMarketChainTabsFilterPersistedRows() {
-  const marketPage = WORKSPACE_PAGES.find((page) => page.id === "market");
-  const root = fakeRoot();
-  marketPage.render({
-    root,
-    payload: {
-      available: true,
-      items: [
-        { symbol: "BASE", network: "base" },
-        { symbol: "SOL", network: "sol" },
-      ],
-    },
-    api: {},
-  });
-  const baseTab = descendants(root).find(
-    (node) => node.tagName === "BUTTON" && node.textContent === "base"
-  );
-  baseTab.click();
-  assert.ok(root.textContent.includes("BASE"));
-  assert.ok(!root.textContent.includes("SOL"));
-}
-
 function testStaleReadOnlyRequestsCannotReplaceCurrentPage() {
   const pageA = WORKSPACE_PAGES[0];
   const pageB = WORKSPACE_PAGES[1];
@@ -460,7 +522,7 @@ function testDiagnosticsDoesNotEquateDatabaseReadabilityWithListenerActivity() {
       available: true,
       sources: {
         messages: { available: true },
-        workspace: { available: false, reason: "source_unavailable" },
+        analysis: { available: false, reason: "source_unavailable" },
         configuration: { available: true },
       },
       listenerState: "unknown",
@@ -485,7 +547,7 @@ function testDiagnosticsDoesNotEquateDatabaseReadabilityWithListenerActivity() {
         available: true,
         sources: {
           messages: { available: true },
-          workspace: { available: false, reason },
+          analysis: { available: false, reason },
           configuration: { available: true },
         },
         listenerState: "unknown",
@@ -503,7 +565,7 @@ function testDiagnosticsUsesLatestBootstrapListenerAndMessageSource() {
     listenerState: "active",
     sources: {
       messages: { available: true, reason: null },
-      workspace: { available: true, reason: null },
+      analysis: { available: true, reason: null },
       configuration: { available: true, reason: null },
     },
     items: [],
@@ -515,7 +577,7 @@ function testDiagnosticsUsesLatestBootstrapListenerAndMessageSource() {
   });
   assert.strictEqual(inactive.listenerState, "inactive");
   assert.deepStrictEqual(inactive.sources.messages, { available: true, reason: null });
-  assert.deepStrictEqual(inactive.sources.workspace, { available: true, reason: null });
+  assert.deepStrictEqual(inactive.sources.analysis, { available: true, reason: null });
 
   const unavailable = diagnosticsPayloadWithLiveBootstrap(stale, {
     listenerState: "active",
@@ -538,7 +600,7 @@ function testDiagnosticsRequiresFreshHeartbeatForActiveState() {
     listenerState: "active",
     sources: {
       messages: { available: true, reason: null },
-      workspace: { available: true, reason: null },
+      analysis: { available: true, reason: null },
       configuration: { available: true, reason: null },
     },
     items: [],
@@ -686,180 +748,13 @@ function testAlertsRenderMatchedSafeSourceMessages() {
   assert.ok(copied.includes("https://dexscreener.com/base/0xsafe"));
 }
 
-function testMemeRendersPersistedMentionAndDistinctGroupHeat() {
-  const root = fakeRoot();
-  const copied = [];
-  renderMeme({
-    root,
-    payload: {
-      available: true,
-      items: [{
-        family: "evm",
-        network: "base",
-        address: "0xsafe",
-        state: "watching",
-        symbol: "SAFE",
-        mentionCount: 3,
-        groupNames: ["安全群", "观察群"],
-      }],
-    },
-    api: { copyText: (value) => copied.push(value) },
-  });
-  assert.ok(root.textContent.includes("3 次提及 · 2 个群"));
-  assert.ok(root.textContent.includes("持久化观察窗口"));
-  assert.ok(root.textContent.includes("0xsafe"));
-  const copy = descendants(root).find(
-    (node) => node.tagName === "BUTTON" && node.textContent.includes("复制地址")
-  );
-  copy.click();
-  assert.deepStrictEqual(copied, ["0xsafe"]);
-  assert.ok(!root.textContent.includes("尚无聚合值"));
-}
-
-function testTradingRendersAndCopiesTokenAddress() {
-  const root = fakeRoot();
-  const copied = [];
-  renderTrading({
-    root,
-    payload: {
-      available: true,
-      walletSafeStatus: "私钥未下发",
-      items: [{
-        symbol: "SAFE",
-        tokenAddress: "0xtrade",
-        state: "simulated",
-        network: "base",
-      }],
-    },
-    api: { copyText: (value) => copied.push(value) },
-  });
-  assert.ok(root.textContent.includes("0xtrade"));
-  const copy = descendants(root).find(
-    (node) => node.tagName === "BUTTON" && node.textContent.includes("复制地址")
-  );
-  copy.click();
-  assert.deepStrictEqual(copied, ["0xtrade"]);
-}
-
-function testTradingAndAutomationCompositesPreserveSettingsAvailability() {
-  assert.strictEqual(typeof frontendState.composeReadOnlyPagePayload, "function");
-  assert.strictEqual(typeof frontendState.isRetriableReadOnlyPayload, "function");
-  const lockedSettings = { available: false, reason: "source_locked" };
-  const automationPayload = frontendState.composeReadOnlyPagePayload(
-    "automations",
-    { available: true, items: [{ name: "旧规则" }] },
-    { available: true, items: [{ intentId: "intent-1" }] },
-    lockedSettings
-  );
-  assert.deepStrictEqual(automationPayload.settingsDependency, lockedSettings);
-  assert.strictEqual(automationPayload.configurationStatus, null);
-  assert.deepStrictEqual(automationPayload.recentIntents, [{ intentId: "intent-1" }]);
-  assert.strictEqual(frontendState.isRetriableReadOnlyPayload(automationPayload), true);
-
-  const tradingPayload = frontendState.composeReadOnlyPagePayload(
-    "trading",
-    { available: true, items: [{ symbol: "SAFE" }] },
-    null,
-    { available: false, reason: "source_permission_denied" }
-  );
-  assert.deepStrictEqual(tradingPayload.settingsDependency, {
-    available: false,
-    reason: "source_permission_denied",
-  });
-  assert.strictEqual(tradingPayload.walletSafeStatus, null);
-  assert.strictEqual(frontendState.isRetriableReadOnlyPayload(tradingPayload), false);
-
-  const previous = {
-    available: true,
-    settingsDependency: { available: true, reason: null },
-    configurationStatus: true,
-    items: [{ name: "保留规则" }],
-  };
-  const retained = retainReadOnlyPayload(previous, automationPayload);
-  assert.deepStrictEqual(retained.items, previous.items);
-  assert.strictEqual(retained.configurationStatus, previous.configurationStatus);
-  assert.deepStrictEqual(retained.settingsDependency, lockedSettings);
-}
-
-function testAutomationCompositePreservesUnavailableTradesDependency() {
-  const reasonCases = [
-    ["source_locked", "数据源临时锁定", true],
-    ["schema_incompatible", "数据源版本不兼容", true],
-    ["source_corrupt", "数据源已损坏", true],
-    ["source_permission_denied", "数据源权限不足", false],
-    ["source_unavailable", "数据源尚未生成", false],
-  ];
-  const previous = {
-    available: true,
-    settingsDependency: { available: true, reason: null },
-    tradesDependency: { available: true, reason: null },
-    configurationStatus: true,
-    recentIntents: [{ intentId: "retained-intent" }],
-    items: [{ name: "保留规则" }],
-  };
-
-  for (const [reason, label, retriable] of reasonCases) {
-    const payload = frontendState.composeReadOnlyPagePayload(
-      "automations",
-      { available: true, items: [{ name: "替换规则" }] },
-      { available: false, reason, items: [] },
-      { available: true, reason: null, tradingConfigured: true }
-    );
-    assert.deepStrictEqual(payload.tradesDependency, { available: false, reason });
-    assert.strictEqual(frontendState.isRetriableReadOnlyPayload(payload), retriable);
-    const retained = retainReadOnlyPayload(previous, payload);
-    if (retriable) {
-      assert.deepStrictEqual(retained.items, previous.items);
-      assert.deepStrictEqual(retained.recentIntents, previous.recentIntents);
-      assert.deepStrictEqual(retained.tradesDependency, { available: false, reason });
-    } else {
-      assert.strictEqual(retained, payload);
-    }
-
-    const root = fakeRoot();
-    renderAutomations({ root, payload, api: {} });
-    assert.ok(root.textContent.includes(label), `${reason}: ${root.textContent}`);
-    assert.ok(!root.textContent.includes("暂无最近意图"), `${reason}: ${root.textContent}`);
-  }
-
-  const available = frontendState.composeReadOnlyPagePayload(
-    "automations",
-    { available: true, items: [] },
-    { available: true, reason: null, items: [{ intentId: "intent-available" }] },
-    { available: true, reason: null, tradingConfigured: true }
-  );
-  assert.deepStrictEqual(available.tradesDependency, { available: true, reason: null });
-  assert.deepStrictEqual(available.recentIntents, [{ intentId: "intent-available" }]);
-
-  const previousEmpty = {
-    ...previous,
-    recentIntents: [],
-  };
-  const lockedAfterEmptySuccess = frontendState.composeReadOnlyPagePayload(
-    "automations",
-    { available: true, items: [{ name: "保留规则" }] },
-    { available: false, reason: "source_locked", items: [] },
-    { available: true, reason: null, tradingConfigured: true }
-  );
-  const retainedEmpty = retainReadOnlyPayload(previousEmpty, lockedAfterEmptySuccess);
-  const retainedRoot = fakeRoot();
-  renderAutomations({ root: retainedRoot, payload: retainedEmpty, api: {} });
-  assert.deepStrictEqual(retainedEmpty.recentIntents, []);
-  assert.deepStrictEqual(retainedEmpty.tradesDependency, {
-    available: false,
-    reason: "source_locked",
-  });
-  assert.ok(retainedRoot.textContent.includes("数据源临时锁定"));
-  assert.ok(!retainedRoot.textContent.includes("暂无最近意图"));
-}
-
 function testDiagnosticsSupplementalMessagesDependencyControlsTruthAndRetry() {
   assert.strictEqual(typeof frontendState.composeDiagnosticsPagePayload, "function");
   const primary = {
     available: true,
     sources: {
       messages: { available: true, reason: null },
-      workspace: { available: true, reason: null },
+      analysis: { available: true, reason: null },
       configuration: { available: true, reason: null },
     },
     listenerState: "inactive",
@@ -925,7 +820,7 @@ function testDiagnosticsSupplementalMessagesDependencyControlsTruthAndRetry() {
     listenerState: "active",
     sources: {
       ...primary.sources,
-      workspace: { available: false, reason: "source_corrupt" },
+      analysis: { available: false, reason: "source_corrupt" },
     },
     healthGeneration: 2,
   };
@@ -940,7 +835,7 @@ function testDiagnosticsSupplementalMessagesDependencyControlsTruthAndRetry() {
   assert.strictEqual(retainedWithFreshPrimary.lastMessageAt, previous.lastMessageAt);
   assert.strictEqual(retainedWithFreshPrimary.listenerState, "active");
   assert.strictEqual(retainedWithFreshPrimary.healthGeneration, 2);
-  assert.deepStrictEqual(retainedWithFreshPrimary.sources.workspace, {
+  assert.deepStrictEqual(retainedWithFreshPrimary.sources.analysis, {
     available: false,
     reason: "source_corrupt",
   });
@@ -966,7 +861,7 @@ function testDiagnosticsPrimaryFailurePayloadIsExplicitAndRetainsHistory() {
     reason: null,
     listenerState: "active",
     sources: {
-      workspace: { available: false, reason: "source_corrupt" },
+      analysis: { available: false, reason: "source_corrupt" },
     },
     healthGeneration: 7,
     lastMessageAt: "2026-09-03T01:02:03Z",
@@ -985,253 +880,6 @@ function testDiagnosticsPrimaryFailurePayloadIsExplicitAndRetainsHistory() {
   });
   assert.deepStrictEqual(retained.retriableErrors, []);
   assert.strictEqual(isRetriableReadOnlyPayload(retained), true);
-}
-
-function testTradingAndAutomationUiNeverCallUnavailableSettingsUnconfigured() {
-  for (const [render, payload] of [
-    [renderAutomations, {
-      available: true,
-      settingsDependency: { available: false, reason: "source_locked" },
-      configurationStatus: null,
-      items: [],
-    }],
-    [renderTrading, {
-      available: true,
-      settingsDependency: { available: false, reason: "source_locked" },
-      walletSafeStatus: null,
-      items: [],
-    }],
-  ]) {
-    const root = fakeRoot();
-    render({ root, payload, api: {} });
-    assert.ok(root.textContent.includes("数据源临时锁定"));
-    assert.ok(!root.textContent.includes("未配置"));
-    assert.ok(!root.textContent.includes("交易配置未启用"));
-  }
-}
-
-async function testAutomationCompositeRetainsPriorDependencyAndPayloadDuringLock() {
-  const previousGlobals = {
-    document: globalThis.document,
-    fetch: globalThis.fetch,
-    sessionStorage: globalThis.sessionStorage,
-    window: globalThis.window,
-  };
-  const document = new FakeDocument();
-  const timers = new Map();
-  let nextTimer = 1;
-  const window = {
-    location: { hash: "#automations" },
-    addEventListener() {},
-    clearTimeout(id) {
-      timers.delete(id);
-    },
-    setTimeout(callback, delay) {
-      const id = nextTimer;
-      nextTimer += 1;
-      timers.set(id, { callback, delay });
-      return id;
-    },
-  };
-  const storage = new MemoryStorage();
-  authenticate("composite-retention-token", storage);
-  let automationRequests = 0;
-  let settingsRequests = 0;
-
-  globalThis.document = document;
-  globalThis.window = window;
-  globalThis.sessionStorage = storage;
-  globalThis.fetch = async (url) => {
-    const path = String(url).split("?")[0];
-    let payload;
-    if (path === "/api/bootstrap") {
-      payload = {
-        readOnly: true,
-        listenerState: "inactive",
-        messageSource: { available: true, listenerState: "inactive" },
-        groups: [],
-        counts: { inbox: 0 },
-      };
-    } else if (path === "/api/automations") {
-      automationRequests += 1;
-      payload = {
-        available: true,
-        items: [{ name: automationRequests === 1 ? "RETAINED_AUTOMATION" : "REPLACEMENT_AUTOMATION" }],
-      };
-    } else if (path === "/api/trades") {
-      payload = { available: true, items: [] };
-    } else if (path === "/api/settings/status") {
-      settingsRequests += 1;
-      payload = settingsRequests === 1
-        ? { available: true, reason: null, tradingConfigured: true }
-        : { available: false, reason: "source_locked" };
-    } else {
-      throw new Error(`unexpected request ${path}`);
-    }
-    return { ok: true, status: 200, json: async () => payload };
-  };
-
-  try {
-    const appUrl = new URL("../web/wxfomo-lan/app.mjs", import.meta.url);
-    appUrl.searchParams.set("composite-retention-test", String(Date.now()));
-    await import(appUrl.href);
-    for (let index = 0; index < 24; index += 1) {
-      await Promise.resolve();
-    }
-    const appShell = document.getElementById("app-shell");
-    assert.ok(appShell.textContent.includes("RETAINED_AUTOMATION"));
-    assert.ok(appShell.textContent.includes("已配置"));
-
-    document.visibilityState = "hidden";
-    document.listeners.visibilitychange();
-    document.visibilityState = "visible";
-    document.listeners.visibilitychange();
-    for (let index = 0; index < 24; index += 1) {
-      await Promise.resolve();
-    }
-
-    assert.ok(settingsRequests >= 2);
-    assert.ok(appShell.textContent.includes("RETAINED_AUTOMATION"));
-    assert.ok(!appShell.textContent.includes("REPLACEMENT_AUTOMATION"));
-    assert.ok(appShell.textContent.includes("数据源临时锁定"));
-    assert.ok(!appShell.textContent.includes("未配置"));
-    assert.ok(appShell.textContent.includes("依赖数据源暂不可读，保留已有内容后重试"));
-    assert.ok(Array.from(timers.values()).some((timer) => timer.delay === 2000));
-
-    const scheduled = Array.from(timers.values());
-    timers.clear();
-    for (const timer of scheduled) {
-      if (timer.delay === 2000) {
-        timer.callback();
-      }
-    }
-    for (let index = 0; index < 24; index += 1) {
-      await Promise.resolve();
-    }
-    assert.ok(settingsRequests >= 3);
-    assert.ok(Array.from(timers.values()).some((timer) => timer.delay >= 4000));
-  } finally {
-    for (const [name, value] of Object.entries(previousGlobals)) {
-      if (value === undefined) {
-        delete globalThis[name];
-      } else {
-        globalThis[name] = value;
-      }
-    }
-  }
-}
-
-async function testAutomationCompositeRetainsPriorStateAndBacksOffForTradesFailures() {
-  const previousGlobals = {
-    document: globalThis.document,
-    fetch: globalThis.fetch,
-    sessionStorage: globalThis.sessionStorage,
-    window: globalThis.window,
-  };
-  const document = new FakeDocument();
-  const timers = new Map();
-  let nextTimer = 1;
-  const window = {
-    location: { hash: "#automations" },
-    addEventListener() {},
-    clearTimeout(id) {
-      timers.delete(id);
-    },
-    setTimeout(callback, delay) {
-      const id = nextTimer;
-      nextTimer += 1;
-      timers.set(id, { callback, delay });
-      return id;
-    },
-  };
-  const storage = new MemoryStorage();
-  authenticate("trades-dependency-retention-token", storage);
-  let automationRequests = 0;
-  let tradesRequests = 0;
-  const tradesFailures = ["source_locked", "schema_incompatible", "source_corrupt"];
-
-  globalThis.document = document;
-  globalThis.window = window;
-  globalThis.sessionStorage = storage;
-  globalThis.fetch = async (url) => {
-    const path = String(url).split("?")[0];
-    let payload;
-    if (path === "/api/bootstrap") {
-      payload = {
-        readOnly: true,
-        listenerState: "inactive",
-        messageSource: { available: true, listenerState: "inactive" },
-        groups: [],
-        counts: { inbox: 0 },
-      };
-    } else if (path === "/api/automations") {
-      automationRequests += 1;
-      payload = {
-        available: true,
-        items: [{ name: automationRequests === 1 ? "RETAINED_TRADES_RULE" : "REPLACEMENT_TRADES_RULE" }],
-      };
-    } else if (path === "/api/trades") {
-      tradesRequests += 1;
-      payload = tradesRequests === 1
-        ? { available: true, reason: null, items: [{ intentId: "RETAINED_TRADE_INTENT" }] }
-        : {
-            available: false,
-            reason: tradesFailures[Math.min(tradesRequests - 2, tradesFailures.length - 1)],
-            items: [],
-          };
-    } else if (path === "/api/settings/status") {
-      payload = { available: true, reason: null, tradingConfigured: true };
-    } else {
-      throw new Error(`unexpected request ${path}`);
-    }
-    return { ok: true, status: 200, json: async () => payload };
-  };
-
-  try {
-    const appUrl = new URL("../web/wxfomo-lan/app.mjs", import.meta.url);
-    appUrl.searchParams.set("trades-dependency-retention-test", String(Date.now()));
-    await import(appUrl.href);
-    await flushMicrotasks();
-    const appShell = document.getElementById("app-shell");
-    assert.ok(appShell.textContent.includes("RETAINED_TRADES_RULE"));
-    assert.ok(appShell.textContent.includes("RETAINED_TRADE_INTENT"));
-
-    document.visibilityState = "hidden";
-    document.listeners.visibilitychange();
-    document.visibilityState = "visible";
-    document.listeners.visibilitychange();
-    await flushMicrotasks();
-
-    assert.strictEqual(tradesRequests, 2);
-    assert.ok(appShell.textContent.includes("RETAINED_TRADES_RULE"));
-    assert.ok(appShell.textContent.includes("RETAINED_TRADE_INTENT"));
-    assert.ok(!appShell.textContent.includes("REPLACEMENT_TRADES_RULE"));
-    assert.ok(!appShell.textContent.includes("暂无最近意图"));
-    assert.ok(appShell.textContent.includes("数据源临时锁定"));
-    assert.ok(appShell.textContent.includes("保留已有内容后重试"));
-    assert.ok(Array.from(timers.values()).some((timer) => timer.delay === 2000));
-
-    for (const expected of [
-      { minimumRequests: 3, retryDelay: 4000, reasonLabel: "数据源版本不兼容" },
-      { minimumRequests: 4, retryDelay: 8000, reasonLabel: "数据源已损坏" },
-    ]) {
-      const scheduled = Array.from(timers.values());
-      timers.clear();
-      for (const timer of scheduled) {
-        if (timer.delay === expected.retryDelay / 2 || timer.delay === 2000) {
-          timer.callback();
-        }
-      }
-      await flushMicrotasks();
-      assert.ok(tradesRequests >= expected.minimumRequests);
-      assert.ok(appShell.textContent.includes("RETAINED_TRADE_INTENT"));
-      assert.ok(!appShell.textContent.includes("暂无最近意图"));
-      assert.ok(appShell.textContent.includes(expected.reasonLabel));
-      assert.ok(Array.from(timers.values()).some((timer) => timer.delay >= expected.retryDelay));
-    }
-  } finally {
-    restoreGlobals(previousGlobals);
-  }
 }
 
 async function testDiagnosticsSupplementalFailuresRetainPriorStateAndBackOff() {
@@ -1295,7 +943,7 @@ async function testDiagnosticsSupplementalFailuresRetainPriorStateAndBackOff() {
           listenerState: "inactive",
           sources: {
             messages: { available: true, reason: null },
-            workspace: diagnosticsRequests === 1
+            analysis: diagnosticsRequests === 1
               ? { available: false, reason: "source_permission_denied" }
               : { available: false, reason: "source_corrupt" },
             configuration: { available: true, reason: null },
@@ -1441,7 +1089,7 @@ async function testDiagnosticsFirstLoadNativeFetchRejectIsUnavailable() {
           listenerState: "inactive",
           sources: {
             messages: { available: true, reason: null },
-            workspace: { available: false, reason: "source_corrupt" },
+            analysis: { available: false, reason: "source_corrupt" },
             configuration: { available: true, reason: null },
           },
           retriableErrors: [],
@@ -1541,7 +1189,7 @@ async function testDiagnosticsPrimaryFirstLoadFailuresAreExplicitAndRetry() {
             listenerState: "active",
             sources: {
               messages: { available: true, reason: null },
-              workspace: { available: false, reason: "source_corrupt" },
+              analysis: { available: false, reason: "source_corrupt" },
               configuration: { available: true, reason: null },
             },
             retriableErrors: [],
@@ -1875,7 +1523,6 @@ async function testEveryProductionApiPathHasFiniteDefaultTimeout() {
     "/api/bootstrap",
     "/api/messages",
     ...WORKSPACE_PAGES.map((page) => page.endpoint),
-    "/api/trades",
     "/api/settings/status",
   ]));
 
@@ -2082,7 +1729,7 @@ async function testHungWorkspaceReleasesLoadingAndBacksOffAfterDefaultTimeout() 
   const appTimers = new Map();
   let nextTimer = 1;
   const window = {
-    location: { hash: "#meme" },
+    location: { hash: "#analyses" },
     addEventListener() {},
     clearTimeout(id) { appTimers.delete(id); },
     setTimeout(callback, delay) {
@@ -2247,6 +1894,58 @@ async function testVisibleTabInvalidatesListenerBeforeRenderAndRefresh() {
       }
     }
   }
+}
+
+async function testSummaryRefreshPreservesOpenSourcesAndLoadsNewReports() {
+  const previous = { document: globalThis.document, window: globalThis.window,
+    sessionStorage: globalThis.sessionStorage, fetch: globalThis.fetch };
+  const doc = new FakeDocument();
+  const timers = new Map();
+  let timerId = 0;
+  let reads = 0;
+  let updated = false;
+  globalThis.document = doc;
+  globalThis.window = { location: { hash: "#analyses" }, addEventListener() {},
+    setTimeout(fn, delay) { timers.set(++timerId, { fn, delay }); return timerId; },
+    clearTimeout(id) { timers.delete(id); } };
+  globalThis.sessionStorage = new MemoryStorage();
+  authenticate("offline-summary-refresh", globalThis.sessionStorage);
+  globalThis.fetch = async (url) => {
+    const bootstrap = String(url).startsWith("/api/bootstrap");
+    if (!bootstrap) reads += 1;
+    return { ok: true, status: 200, json: async () => bootstrap ? {
+      readOnly: true, listenerState: "inactive", messageSource: { available: true, listenerState: "inactive" },
+      groups: [], counts: { inbox: 1 },
+    } : { available: true, items: [{ jobId: "job-1", cadence: "two_hour", state: "succeeded",
+      summary: updated ? "新总结" : "旧总结",
+      sourceMessages: [{ eventId: "e1", group: "g", sender: "s", content: "离线原文" }] }] } };
+  };
+  try {
+    const url = new URL("../web/wxfomo-lan/app.mjs", import.meta.url);
+    url.searchParams.set("summary-refresh-test", String(Date.now()));
+    await import(url.href);
+    await flushMicrotasks(50);
+    const shell = doc.getElementById("app-shell");
+    const before = descendants(shell).find(node => node.tagName === "DETAILS");
+    before.open = true;
+    const heartbeat = [...timers.entries()].find(([, timer]) => timer.delay === 2000);
+    assert.ok(heartbeat);
+    timers.delete(heartbeat[0]); heartbeat[1].fn();
+    await flushMicrotasks(50);
+    assert.strictEqual(descendants(shell).find(node => node.tagName === "DETAILS"), before,
+      "heartbeat must not replace summary DOM");
+    const refresh = [...timers.entries()].find(([, timer]) => timer.delay > 2000);
+    assert.ok(refresh, "successful summary pages must refresh without a tab switch");
+    updated = true;
+    timers.delete(refresh[0]); refresh[1].fn();
+    await flushMicrotasks(50);
+    assert.strictEqual(reads, 2);
+    assert.ok(shell.textContent.includes("新总结"));
+    assert.strictEqual(descendants(shell).find(node => node.tagName === "DETAILS").open, true,
+      "new reports must preserve open source disclosures");
+    doc.visibilityState = "hidden"; doc.listeners.visibilitychange();
+    assert.strictEqual(timers.size, 0, "hidden tabs stop polling");
+  } finally { restoreGlobals(previous); }
 }
 
 async function testActiveListenerExpiresThroughALocalPresentationTimer() {
@@ -2602,58 +2301,6 @@ function testRulesRenderCompleteSafeTask4ConditionAndActionContract() {
   assert.ok(!root.textContent.includes("NEVER_EXPOSE_ARGUMENT"));
 }
 
-function testAutomationsRenderCompleteSafeTask4ScopeAndRiskContract() {
-  const root = fakeRoot();
-  renderAutomations({
-    root,
-    payload: {
-      available: true,
-      configurationStatus: true,
-      items: [{
-        name: "Paper buy",
-        isEnabled: true,
-        condition: {
-          allowedChains: ["base", "eth"],
-          groups: ["安全群"],
-          senders: ["阿甲"],
-          aggregationWindowSeconds: 600,
-          minimumMentions: 2,
-          minimumDistinctGroups: 2,
-          minimumMarketCapUSD: 500000,
-          maximumMarketCapUSD: 20000000,
-          minimumLiquidityUSD: 100000,
-          minimumHolderCount: 100,
-          maximumRugRatio: 0.1,
-          requireSecurityData: true,
-        },
-        actions: [{
-          type: "trade",
-          inputAmountNative: 0.01,
-          maximumSlippagePercent: 12,
-          antiMEV: true,
-          maximumTradesPerDay: 2,
-          tokenCooldownSeconds: 86400,
-          protectionOrders: [{
-            id: "protection-1",
-            kind: "stop_loss",
-            triggerPercent: 50,
-            sellPercent: 100,
-          }],
-        }],
-      }],
-    },
-    api: {},
-  });
-  for (const expected of [
-    "允许链", "base、eth", "群聊范围", "安全群", "发送者范围", "阿甲",
-    "聚合窗口（秒）", "600", "最低提及数", "最低群数", "最低持有人数",
-    "要求安全数据", "投入原生币", "Anti-MEV", "冷却（秒）", "86400",
-    "保护单", "protection-1", "stop_loss", "触发 50%", "卖出 100%",
-  ]) {
-    assert.ok(root.textContent.includes(expected), expected);
-  }
-}
-
 function testMergeSortsNewestFirstAndDeduplicatesAcrossBatches() {
   const merged = mergeNewMessages(
     [{ eventId: "b", observedAt: "2026-09-02T00:00:02Z" }],
@@ -2830,16 +2477,71 @@ function testFirstPollAfterEmptyInitialEstablishesLiveAndOlderCursors() {
   assert.strictEqual(olderPage.nextBefore, "older-page-oldest");
 }
 
+async function testInboxRuleBadgesKeepAllTagsAccessibleWithoutWriteControls() {
+  const previous = {
+    document: globalThis.document,
+    window: globalThis.window,
+    sessionStorage: globalThis.sessionStorage,
+  };
+  const document = new FakeDocument();
+  globalThis.document = document;
+  globalThis.window = {
+    location: { hash: "#inbox" },
+    addEventListener() {},
+    setTimeout() { return 1; },
+    clearTimeout() {},
+  };
+  globalThis.sessionStorage = new MemoryStorage();
+  try {
+    const { MessageRuleBadges } = await import("../web/wxfomo-lan/app.mjs?rule-badges-test");
+    const badges = MessageRuleBadges(document, {
+      tags: ["高风险", "资金信号", "合约", "流动性"],
+      priority: 50,
+      severity: "critical",
+    });
+    assert.ok(badges.textContent.includes("严重性 严重"));
+    assert.ok(badges.textContent.includes("优先级 50"));
+    assert.ok(badges.textContent.includes("+1"));
+    assert.strictEqual(badges.getAttribute("role"), "group");
+    assert.ok(badges.getAttribute("aria-label").includes("高风险、资金信号、合约、流动性"));
+    assert.strictEqual(descendants(badges).filter((node) => node.attributes["data-write-action"]).length, 0);
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete globalThis[name];
+      } else {
+        globalThis[name] = value;
+      }
+    }
+  }
+}
+
+async function testWorkbenchRuleBadgesKeepOverflowTagsInNamedGroup() {
+  const { RuleAnnotationBadges } = await import("../web/wxfomo-lan/pages.mjs?workbench-rule-badges-test");
+  const badges = RuleAnnotationBadges(fakeRoot().ownerDocument, {
+    tags: ["高风险", "资金信号", "合约", "流动性"],
+    priority: 50,
+    severity: "critical",
+  });
+  assert.ok(badges.textContent.includes("+1"));
+  assert.strictEqual(badges.getAttribute("role"), "group");
+  assert.ok(badges.getAttribute("aria-label").includes("高风险、资金信号、合约、流动性"));
+  assert.strictEqual(descendants(badges).filter((node) => node.attributes["data-write-action"]).length, 0);
+}
+
 testWorkspaceRegistryHasExactReadOnlyCoverage();
 testUnavailablePagesUseCanonicalCopyAndNeverRenderWriteActions();
-testProviderPageDisplaysOnlyNamesBooleansAndFixedMask();
+testProviderPageDisplaysOnlyMiniMaxConfigurationState();
 testSourceLinkAcceptsOnlyHttpsAndUsesSafeRelationship();
 testPublicSourceHostAllowlistMatchesTheDocumentedContract();
 testReadOnlyPageNavigationResolvesOnlyRegisteredHashes();
 testPriorityPageIsSeparateReadOnlyRouteWithCanonicalUnavailableCopy();
+testRuleAnnotationsRenderWithoutWriteControls();
+testAnalysisReportsRenderCadenceWindowsSourcesAndReadOnlyStates();
+testAnalysisPayloadNormalizesLegacySummarySources();
+testCAUnresolvedSourcesAreNotReportedAsMissingAI();
 testAvailablePagesIgnoreSecretsPathsAndWriteControls();
 testAlertTabsFilterPendingAndAllRecords();
-testMarketChainTabsFilterPersistedRows();
 testStaleReadOnlyRequestsCannotReplaceCurrentPage();
 testStaleMessageRequestsCannotReportErrorsOnAnotherGenerationOrWorkspace();
 testDiagnosticsDoesNotEquateDatabaseReadabilityWithListenerActivity();
@@ -2850,18 +2552,12 @@ testBootstrapFailureInvalidatesOnlyListenerFreshness();
 testMessageReloadPreservesVisiblePageUntilReplacementSucceeds();
 testUnauthorizedResetAllowsAReplacementLoadAfterReconnect();
 testAlertsRenderMatchedSafeSourceMessages();
-testMemeRendersPersistedMentionAndDistinctGroupHeat();
-testTradingRendersAndCopiesTokenAddress();
-testTradingAndAutomationCompositesPreserveSettingsAvailability();
 testDiagnosticsSupplementalMessagesDependencyControlsTruthAndRetry();
 testDiagnosticsPrimaryFailurePayloadIsExplicitAndRetainsHistory();
-testAutomationCompositePreservesUnavailableTradesDependency();
-testTradingAndAutomationUiNeverCallUnavailableSettingsUnconfigured();
 testRetryRetentionConnectionAndListenerPresentationContracts();
 testUnavailableMessageBootstrapRetainsGroupsAndCountsAcrossRetries();
 testListenerPresentationRequiresAFreshValidHeartbeat();
 testRulesRenderCompleteSafeTask4ConditionAndActionContract();
-testAutomationsRenderCompleteSafeTask4ScopeAndRiskContract();
 testMergeSortsNewestFirstAndDeduplicatesAcrossBatches();
 testMergeDeduplicatesIncomingBatchAndOrdersEqualTimestampsStably();
 testMergeMatchesServerBinaryOrderForEqualTimestamps();
@@ -2870,6 +2566,8 @@ testRouteDecodesEncodedSlashInsideExactGroupName();
 testInvalidRoutesFallBackToInbox();
 testMessagePagesAdvanceOnlyWithOpaqueServerCursor();
 testFirstPollAfterEmptyInitialEstablishesLiveAndOlderCursors();
+await testInboxRuleBadgesKeepAllTagsAccessibleWithoutWriteControls();
+await testWorkbenchRuleBadgesKeepOverflowTagsInNamedGroup();
 await testStaleUnauthorizedRequestCannotClearNewToken();
 await testApiErrorPreservesCanonicalRedactedSourceReason();
 await testBootstrapTimeoutReleasesHungRequestsAndAbortsWhenSupported();
@@ -2877,13 +2575,12 @@ await testEveryProductionApiPathHasFiniteDefaultTimeout();
 await testHungBootstrapReturnsToLoginAfterDefaultTimeout();
 await testHungMessagesReleaseLoadingAndPollingAfterDefaultTimeout();
 await testHungWorkspaceReleasesLoadingAndBacksOffAfterDefaultTimeout();
-await testAutomationCompositeRetainsPriorDependencyAndPayloadDuringLock();
-await testAutomationCompositeRetainsPriorStateAndBacksOffForTradesFailures();
 await testDiagnosticsSupplementalFailuresRetainPriorStateAndBackOff();
 await testDiagnosticsFirstLoadNativeFetchRejectIsUnavailable();
 await testDiagnosticsPrimaryFirstLoadFailuresAreExplicitAndRetry();
 await testClipboardUsesRawHttpFallbackAndManualFallback();
 await testVisibleTabInvalidatesListenerBeforeRenderAndRefresh();
+await testSummaryRefreshPreservesOpenSourcesAndLoadsNewReports();
 await testActiveListenerExpiresThroughALocalPresentationTimer();
 await testUnavailableBootstrapKeepsVisibleMessagesAndUsesBackoff();
 

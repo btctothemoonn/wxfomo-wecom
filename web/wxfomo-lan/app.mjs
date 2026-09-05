@@ -9,6 +9,7 @@ import {
 import { copyText } from "./clipboard.mjs";
 import {
   WORKSPACE_PAGES,
+  RelayProvenance,
   isCurrentMessageRequest,
   isCurrentReadOnlyRequest,
   readOnlyPageFromHash,
@@ -18,7 +19,6 @@ import {
   boundedRetryDelay,
   canLoadMessagePage,
   composeDiagnosticsPagePayload,
-  composeReadOnlyPagePayload,
   diagnosticsPrimaryFailurePayload,
   diagnosticsPayloadWithLiveBootstrap,
   invalidateListenerFreshness,
@@ -26,6 +26,7 @@ import {
   isRetriableReadOnlyPayload,
   listenerFreshnessExpiryDelay,
   listenerPresentation,
+  normalizeReadOnlyPayload,
   prepareMessageReload,
   retainMessageBootstrap,
   retainReadOnlyPayload,
@@ -207,7 +208,7 @@ function sidebar() {
   navigation.appendChild(
     makeSection(
       "工作台",
-      WORKSPACE_PAGES.slice(0, 6).map((page) =>
+      WORKSPACE_PAGES.slice(0, 2).map((page) =>
         makeNavItem(page.label, page.icon, {
           href: `#${page.id}`,
           active: model.route.page === page.id,
@@ -218,7 +219,7 @@ function sidebar() {
   navigation.appendChild(
     makeSection(
       "设置",
-      WORKSPACE_PAGES.slice(6).map((page) =>
+      WORKSPACE_PAGES.slice(2).map((page) =>
         makeNavItem(page.label, page.icon, {
           href: `#${page.id}`,
           active: model.route.page === page.id,
@@ -409,6 +410,53 @@ function copyButton(content) {
   return button;
 }
 
+function ruleSeverityLabel(value) {
+  return value === "critical" ? "严重" : value === "warning" ? "警告" : "";
+}
+
+export function MessageRuleBadges(document, message) {
+  const badgeElement = (tagName, className, text) => {
+    const node = document.createElement(tagName);
+    node.className = className;
+    node.textContent = text;
+    return node;
+  };
+  const source = message && typeof message === "object" ? message : {};
+  const tags = Array.isArray(source.tags)
+    ? source.tags.filter((tag) => typeof tag === "string" && tag.trim())
+    : [];
+  const priority = Number.isInteger(source.priority) && source.priority >= 0
+    ? source.priority
+    : null;
+  const severity = ruleSeverityLabel(source.severity);
+  if (!tags.length && priority === null && !severity) {
+    return null;
+  }
+  const row = badgeElement("div", "message-rule-badges", "");
+  row.setAttribute("role", "group");
+  const ariaParts = [];
+  if (severity) {
+    row.appendChild(badgeElement("span", `rule-tag severity-${source.severity}`, `严重性 ${severity}`));
+    ariaParts.push(`严重性 ${severity}`);
+  }
+  if (priority !== null) {
+    row.appendChild(badgeElement("span", "rule-tag", `优先级 ${priority}`));
+    ariaParts.push(`优先级 ${priority}`);
+  }
+  const visibleTags = tags.slice(0, 3);
+  for (const tag of visibleTags) {
+    row.appendChild(badgeElement("span", "rule-tag", tag));
+  }
+  if (tags.length > visibleTags.length) {
+    row.appendChild(badgeElement("span", "rule-tag rule-tag-overflow", `+${tags.length - visibleTags.length}`));
+  }
+  if (tags.length) {
+    ariaParts.push(`规则标签 ${tags.join("、")}`);
+  }
+  row.setAttribute("aria-label", ariaParts.join("；"));
+  return row;
+}
+
 function messageCard(message) {
   const item = element("li", "message-card");
   if (message.messageType === "media") {
@@ -427,7 +475,13 @@ function messageCard(message) {
     meta.appendChild(badge);
   }
   main.appendChild(meta);
+  const badges = MessageRuleBadges(document, message);
+  if (badges) {
+    main.appendChild(badges);
+  }
   main.appendChild(element("p", "message-body", message.content));
+  const provenance = RelayProvenance(document, message);
+  if (provenance) main.appendChild(provenance);
   item.appendChild(main);
 
   const side = element("div", "message-side");
@@ -570,7 +624,7 @@ function readOnlyWorkbench() {
       : model.readOnlyPayload;
     pageCleanup = page.render({
       root: host,
-      payload,
+      payload: normalizeReadOnlyPayload(page.id, payload),
       api: { requestJson, copyText },
     });
   }
@@ -590,16 +644,36 @@ function renderWorkbench() {
     pageCleanup();
     pageCleanup = null;
   }
-  const oldScroll = appShell.querySelector(".feed-scroll");
+  const openSources = new Set(Array.from(appShell.querySelectorAll("[data-disclosure-key]"))
+    .filter(node => node.open).map(node => node.getAttribute("data-disclosure-key")));
+  const scrollSelector = model.route.readOnlyPage ? ".workspace-page-host" : ".feed-scroll";
+  const oldScroll = appShell.querySelector(scrollSelector);
   const scrollTop = oldScroll ? oldScroll.scrollTop : 0;
   appShell.replaceChildren(
     sidebar(),
     model.route.readOnlyPage ? readOnlyWorkbench() : mainWorkbench()
   );
-  const newScroll = appShell.querySelector(".feed-scroll");
+  for (const node of appShell.querySelectorAll("[data-disclosure-key]")) {
+    node.open = openSources.has(node.getAttribute("data-disclosure-key"));
+  }
+  const newScroll = appShell.querySelector(scrollSelector);
   if (newScroll) {
     newScroll.scrollTop = scrollTop;
   }
+  scheduleListenerFreshnessExpiry();
+}
+
+function renderConnectionStatus() {
+  const sidebarNode = appShell.querySelector(".sidebar");
+  if (!model.route.readOnlyPage || !model.readOnlyPayload || !sidebarNode
+      || model.route.readOnlyPage.id === "diagnostics") {
+    renderWorkbench();
+    return;
+  }
+  // Keep the report DOM, selection and expanded source messages intact.
+  sidebarNode.replaceChildren(...sidebar().children);
+  const status = appShell.querySelector(".footer-spacer");
+  if (status) status.textContent = model.statusMessage;
   scheduleListenerFreshnessExpiry();
 }
 
@@ -622,31 +696,11 @@ function scheduleListenerFreshnessExpiry() {
   listenerFreshnessTimer = window.setTimeout(() => {
     listenerFreshnessTimer = null;
     model.bootstrap = invalidateListenerFreshness(model.bootstrap);
-    renderWorkbench();
+    renderConnectionStatus();
   }, delay);
 }
 
 async function payloadForReadOnlyPage(page) {
-  if (page.id === "automations") {
-    const responses = await Promise.all([
-      requestJson(page.endpoint),
-      requestJson("/api/trades"),
-      requestJson("/api/settings/status"),
-    ]);
-    return composeReadOnlyPagePayload(
-      page.id,
-      responses[0],
-      responses[1],
-      responses[2]
-    );
-  }
-  if (page.id === "trading") {
-    const responses = await Promise.all([
-      requestJson(page.endpoint),
-      requestJson("/api/settings/status"),
-    ]);
-    return composeReadOnlyPagePayload(page.id, responses[0], null, responses[1]);
-  }
   if (page.id === "diagnostics") {
     const diagnostics = await requestJson(page.endpoint);
     let messages = {
@@ -694,7 +748,7 @@ function clearReadOnlyRetry() {
   }
 }
 
-function scheduleReadOnlyRetry(page) {
+function scheduleReadOnlyReload(page, delay) {
   clearReadOnlyRetry();
   if (
     !model.authenticated
@@ -703,14 +757,17 @@ function scheduleReadOnlyRetry(page) {
   ) {
     return;
   }
-  const delay = boundedRetryDelay(model.readOnlyRetryAttempt);
-  model.readOnlyRetryAttempt += 1;
   readOnlyRetryTimer = window.setTimeout(() => {
     readOnlyRetryTimer = null;
     if (model.route.readOnlyPage === page) {
       loadReadOnlyPage();
     }
   }, delay);
+}
+
+function scheduleReadOnlyRetry(page) {
+  scheduleReadOnlyReload(page, boundedRetryDelay(model.readOnlyRetryAttempt));
+  model.readOnlyRetryAttempt += 1;
 }
 
 async function loadReadOnlyPage() {
@@ -721,9 +778,10 @@ async function loadReadOnlyPage() {
   clearReadOnlyRetry();
   model.requestGeneration += 1;
   const generation = model.requestGeneration;
+  const previousContent = JSON.stringify(model.readOnlyPayload);
   model.readOnlyLoading = true;
   model.statusMessage = "正在读取只读数据";
-  renderWorkbench();
+  renderConnectionStatus();
   try {
     const payload = await payloadForReadOnlyPage(page);
     if (!isCurrentReadOnlyRequest(
@@ -744,6 +802,7 @@ async function loadReadOnlyPage() {
       model.readOnlyRetryAttempt = 0;
       model.statusMessage = "只读数据已更新";
       model.statusKind = "ready";
+      scheduleReadOnlyReload(page, 30000);
     }
   } catch (error) {
     if (!isCurrentReadOnlyRequest(
@@ -784,7 +843,8 @@ async function loadReadOnlyPage() {
   } finally {
     if (generation === model.requestGeneration) {
       model.readOnlyLoading = false;
-      renderWorkbench();
+      if (JSON.stringify(model.readOnlyPayload) !== previousContent) renderWorkbench();
+      else renderConnectionStatus();
     }
   }
 }
@@ -991,7 +1051,7 @@ async function refreshBootstrap() {
       model.statusMessage = "消息源暂不可读，保留已有内容后退避重试";
       model.statusKind = "error";
     }
-    renderWorkbench();
+    renderConnectionStatus();
     if (!wasAvailable && isAvailable && !model.route.readOnlyPage) {
       await loadMessages(false);
       syncPolling(POLL_INTERVAL_MS);
@@ -1010,7 +1070,7 @@ async function refreshBootstrap() {
     model.bootstrap = invalidateListenerFreshness(model.bootstrap);
     model.statusMessage = "连接状态暂不可读，保留已有内容";
     model.statusKind = "error";
-    renderWorkbench();
+    renderConnectionStatus();
   } finally {
     if (isCurrentConnection(generation, model.connectionGeneration) && model.authenticated) {
       scheduleBootstrapRefresh();
@@ -1118,7 +1178,7 @@ window.addEventListener("hashchange", () => {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     model.bootstrap = invalidateListenerFreshness(model.bootstrap);
-    renderWorkbench();
+    renderConnectionStatus();
     syncPolling(POLL_INTERVAL_MS);
     scheduleBootstrapRefresh();
     if (model.route.readOnlyPage) {

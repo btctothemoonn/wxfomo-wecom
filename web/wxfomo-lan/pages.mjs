@@ -70,15 +70,133 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? "时间未知" : dateFormatter.format(date);
 }
 
-function formatMoney(value) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return "—";
+function stringList(value) {
+  return Array.isArray(value)
+    ? value.filter((item) => typeof item === "string" && item.trim())
+    : [];
+}
+
+function analysisSourceIDs(value) {
+  const current = stringList(value && value.sourceMessageIDs);
+  if (current.length) {
+    return current;
   }
-  return new Intl.NumberFormat("zh-CN", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: value < 1 ? 6 : 2,
-  }).format(value);
+  return stringList(value && value.sourceReferences);
+}
+
+function analysisCadenceLabel(value) {
+  return {
+    two_hour: "2 小时",
+    six_hour: "6 小时",
+    daily: "24 小时",
+  }[value] || "周期未知";
+}
+
+function analysisStateLabel(value) {
+  return {
+    queued: "等待执行",
+    pending: "等待执行",
+    running: "正在分析",
+    retry_wait: "等待重试",
+    credential_required: "需要配置凭据",
+    succeeded: "已完成",
+    failed: "执行失败",
+    cancelled: "已取消",
+    skipped_empty: "窗口无消息",
+  }[value] || "状态未知";
+}
+
+function analysisWindowLabel(item) {
+  const start = item && typeof item.windowStart === "string" ? item.windowStart : null;
+  const end = item && typeof item.windowEnd === "string" ? item.windowEnd : null;
+  if (!start || !end || Number.isNaN(Date.parse(start)) || Number.isNaN(Date.parse(end))) {
+    return "窗口未知";
+  }
+  return `[${formatDate(start)}, ${formatDate(end)})`;
+}
+
+function severityLabel(value) {
+  return value === "critical" ? "严重" : value === "warning" ? "警告" : "信息";
+}
+
+export function RuleAnnotationBadges(document, item) {
+  const source = object(item);
+  const tags = stringList(source.tags);
+  const priority = Number.isInteger(source.priority) && source.priority >= 0
+    ? source.priority
+    : null;
+  const severity = source.severity === "critical" || source.severity === "warning"
+    ? source.severity
+    : null;
+  if (!tags.length && priority === null && !severity) {
+    return null;
+  }
+  const badges = element(document, "div", "message-rule-badges");
+  badges.setAttribute("role", "group");
+  const labels = [];
+  if (severity) {
+    const label = `严重性 ${severityLabel(severity)}`;
+    badges.appendChild(element(document, "span", `rule-tag severity-${severity}`, label));
+    labels.push(label);
+  }
+  if (priority !== null) {
+    const label = `优先级 ${priority}`;
+    badges.appendChild(element(document, "span", "rule-tag", label));
+    labels.push(label);
+  }
+  const visible = tags.slice(0, 3);
+  for (const tag of visible) {
+    badges.appendChild(element(document, "span", "rule-tag", tag));
+  }
+  if (tags.length > visible.length) {
+    badges.appendChild(element(document, "span", "rule-tag rule-tag-overflow", `+${tags.length - visible.length}`));
+  }
+  if (tags.length) {
+    labels.push(`规则标签 ${tags.join("、")}`);
+  }
+  badges.setAttribute("aria-label", labels.join("；"));
+  return badges;
+}
+
+export function RelayProvenance(document, message, scope = "") {
+  if (typeof message.relaySender !== "string" || typeof message.originalContent !== "string") {
+    return null;
+  }
+  const details = element(document, "details", "relay-provenance");
+  details.setAttribute("data-disclosure-key", `${scope}/relay/${message.eventId || ""}`);
+  details.appendChild(element(document, "summary", "", `经 ${message.relaySender || "未知转发者"} 转发 · 查看原文`));
+  details.appendChild(element(document, "p", "relay-original", message.originalContent));
+  return details;
+}
+
+function AnalysisSourceList(document, messages, scope = "") {
+  const collection = Array.isArray(messages) ? messages : [];
+  if (!collection.length) {
+    return null;
+  }
+  const list = element(document, "ol", "analysis-source-list");
+  for (const rawMessage of collection) {
+    const message = object(rawMessage);
+    if (typeof message.content !== "string" || !message.content) {
+      continue;
+    }
+    const item = element(document, "li", "source-message");
+    item.appendChild(element(
+      document,
+      "p",
+      "source-message-meta",
+      `${formatValue(message.group)} · ${formatValue(message.sender)}`
+    ));
+    item.appendChild(element(document, "p", "source-message-body", message.content));
+    const provenance = RelayProvenance(document, message, scope);
+    if (provenance) item.appendChild(provenance);
+    const badges = RuleAnnotationBadges(document, message);
+    if (badges) {
+      item.appendChild(badges);
+    }
+    list.appendChild(item);
+  }
+  return list.children.length ? list : null;
 }
 
 function formatValue(value) {
@@ -241,9 +359,10 @@ export function JsonFindingList(document, findings) {
     }
     item.appendChild(meta);
     item.appendChild(element(document, "p", "finding-text", safeFinding.text || "未提供结论正文"));
-    if (Array.isArray(safeFinding.sourceReferences) && safeFinding.sourceReferences.length) {
+    const sources = analysisSourceIDs(safeFinding);
+    if (sources.length) {
       item.appendChild(
-        element(document, "p", "source-reference", `来源 ${safeFinding.sourceReferences.join(" · ")}`)
+        element(document, "p", "source-reference", `来源 ${sources.join(" · ")}`)
       );
     }
     list.appendChild(item);
@@ -324,7 +443,7 @@ export function renderAlerts({ root, payload, api }) {
     for (const item of collection) {
       const card = element(document, "li", "record-card alert-card");
       const header = element(document, "div", "record-card-header");
-      header.appendChild(StatusPill(document, item.severity || "information", statusKind(item.severity)));
+      header.appendChild(StatusPill(document, `严重性 ${severityLabel(item.severity)}`, statusKind(item.severity)));
       header.appendChild(element(document, "h2", "record-title", item.title || "未命名提醒"));
       header.appendChild(element(document, "time", "record-time", formatDate(item.updatedAt)));
       card.appendChild(header);
@@ -367,6 +486,8 @@ export function renderAlerts({ root, payload, api }) {
             )
           );
           source.appendChild(element(document, "p", "source-message-body", message.content));
+          const provenance = RelayProvenance(document, message);
+          if (provenance) source.appendChild(provenance);
           if (Array.isArray(message.links) && message.links.length) {
             const links = element(document, "div", "source-links");
             for (const href of message.links) {
@@ -407,9 +528,49 @@ export function renderAlerts({ root, payload, api }) {
   return cleanup;
 }
 
+function CrossCACards(document, report) {
+  const data = object(report.crossGroupCA);
+  const cards = Array.isArray(data.items) ? data.items : [];
+  if (!cards.length && data.sourcesComplete !== false) return null;
+  const panel = section(document, "跨群 CA", "仅统计本周期已捕获的消息，不代表链上验证或投资建议");
+  if (data.sourcesComplete === false) {
+    panel.appendChild(element(document, "p", "record-body", "部分原文不可用，以下统计可能不完整。"));
+  }
+  for (const raw of cards) {
+    const card = object(raw);
+    const entry = element(document, "section", "topic-card");
+    entry.appendChild(element(document, "code", "address-value", card.address));
+    entry.appendChild(element(document, "p", "source-reference", card.network === "unknown"
+      ? "链待确认，暂不跨群合并" : `${card.network} · 链信息来自消息标注或地址格式`));
+    entry.appendChild(element(document, "p", "record-body",
+      `${formatValue(card.groupCount)} 群 · ${formatValue(card.mentionCount)} 条提及 · ${formatValue(card.uniqueStatementCount)} 条去重发言 · ${formatValue(card.duplicateCount)} 条重复传播`));
+    entry.appendChild(element(document, "p", "source-reference", `涉及群：${formatValue(card.groupNames)}`));
+    if (Array.isArray(card.speakers) && card.speakers.length) {
+      entry.appendChild(element(document, "p", "source-reference", `发言昵称：${formatValue(card.speakers)}（同名不代表同一人）`));
+    }
+    entry.appendChild(element(document, "p", "record-body", card.summary || (
+      card.summaryUnavailableReason === "unresolved_sources"
+        ? "已有 AI 引用暂不能唯一关联到此 CA，保留原文供核对。"
+        : "本次报告未生成单独的 AI 摘要，可查看下方原文。")));
+    const ids = new Set(stringList(card.sourceMessageIDs));
+    const scope = JSON.stringify([report.jobId, card.address, card.network, card.groupNames]);
+    const sources = AnalysisSourceList(document, (report.sourceMessages || []).filter(message => ids.has(message.eventId)), scope);
+    if (sources) {
+      const disclosure = element(document, "details", "relay-provenance");
+      disclosure.setAttribute("data-disclosure-key", `ca/${scope}`);
+      disclosure.appendChild(element(document, "summary", "", "来源示例（最多 5 条）"));
+      disclosure.appendChild(sources);
+      entry.appendChild(disclosure);
+    }
+    panel.appendChild(entry);
+  }
+  panel.appendChild(element(document, "p", "source-reference", `显示 ${cards.length}/${formatValue(data.total)} 个 CA；重复传播按相同昵称和正文估算，不等于独立认可人数。`));
+  return panel;
+}
+
 export function renderAnalyses({ root, payload, api }) {
   void api;
-  const page = begin(root, "分析记录", "已生成任务、总结与可追溯来源", payload);
+  const page = begin(root, "分析记录", "最近 30 个任务、总结与可追溯来源；历史记录保留在本机", payload);
   if (page.unavailable) {
     return cleanup;
   }
@@ -423,11 +584,16 @@ export function renderAnalyses({ root, payload, api }) {
   const jobList = element(document, "ol", "analysis-job-list");
   for (const item of collection) {
     const job = element(document, "li", "analysis-job");
-    job.appendChild(StatusPill(document, item.state || "unknown", statusKind(item.state)));
+    job.appendChild(StatusPill(document, analysisStateLabel(item.state), statusKind(item.state)));
     job.appendChild(element(document, "p", "analysis-job-mode", item.mode || "分析任务"));
+    job.appendChild(element(document, "p", "analysis-cadence", `周期 ${analysisCadenceLabel(item.cadence)}`));
+    job.appendChild(element(document, "p", "analysis-window", analysisWindowLabel(item)));
     job.appendChild(
       element(document, "p", "analysis-job-meta", `尝试 ${formatValue(item.attempt)}/${formatValue(item.maximumAttempts)}`)
     );
+    if (item.state === "retry_wait" && item.nextAttemptAt) {
+      job.appendChild(element(document, "p", "analysis-job-meta", `下次重试 ${formatDate(item.nextAttemptAt)}`));
+    }
     job.appendChild(element(document, "time", "record-time", formatDate(item.updatedAt)));
     jobList.appendChild(job);
   }
@@ -440,19 +606,22 @@ export function renderAnalyses({ root, payload, api }) {
       continue;
     }
     const result = element(document, "article", "analysis-result");
-    result.appendChild(element(document, "h3", "record-title", item.summary || item.mode || "分析结果"));
+    result.appendChild(element(document, "h3", "record-title", `${analysisCadenceLabel(item.cadence)}总结`));
+    result.appendChild(element(document, "p", "analysis-window", analysisWindowLabel(item)));
     if (item.summary) {
       result.appendChild(element(document, "p", "record-body", item.summary));
     }
     for (const topic of Array.isArray(item.topics) ? item.topics : []) {
+      const safeTopic = object(topic);
       const topicCard = element(document, "section", "topic-card");
-      topicCard.appendChild(element(document, "h4", "topic-title", topic.title || "主题"));
-      if (topic.summary) {
-        topicCard.appendChild(element(document, "p", "record-body", topic.summary));
+      topicCard.appendChild(element(document, "h4", "topic-title", safeTopic.title || "主题"));
+      if (safeTopic.summary) {
+        topicCard.appendChild(element(document, "p", "record-body", safeTopic.summary));
       }
-      if (Array.isArray(topic.sourceReferences) && topic.sourceReferences.length) {
+      const sources = analysisSourceIDs(safeTopic);
+      if (sources.length) {
         topicCard.appendChild(
-          element(document, "p", "source-reference", `来源 ${topic.sourceReferences.join(" · ")}`)
+          element(document, "p", "source-reference", `来源 ${sources.join(" · ")}`)
         );
       }
       result.appendChild(topicCard);
@@ -460,112 +629,52 @@ export function renderAnalyses({ root, payload, api }) {
     if (Array.isArray(item.findings) && item.findings.length) {
       result.appendChild(JsonFindingList(document, item.findings));
     }
-    if (Array.isArray(item.sourceReferences) && item.sourceReferences.length) {
+    const summarySources = stringList(item.summarySourceMessageIDs).length
+      ? stringList(item.summarySourceMessageIDs)
+      : stringList(item.sourceReferences);
+    if (summarySources.length) {
       result.appendChild(
-        element(document, "p", "source-reference", `总结来源 ${item.sourceReferences.join(" · ")}`)
+        element(document, "p", "source-reference", `总结来源 ${summarySources.join(" · ")}`)
       );
+    }
+    const caCards = CrossCACards(document, item);
+    if (caCards) result.appendChild(caCards);
+    const addresses = !caCards && Array.isArray(item.cryptoAddresses) ? item.cryptoAddresses : [];
+    if (addresses.length) {
+      const addressList = element(document, "ul", "analysis-ca-list");
+      for (const rawAddress of addresses) {
+        const address = object(rawAddress);
+        if (typeof address.address !== "string" || !address.address) {
+          continue;
+        }
+        const row = element(document, "li", "analysis-ca-item");
+        row.appendChild(element(document, "span", "rule-tag", "CA"));
+        row.appendChild(element(document, "code", "address-value", address.address));
+        if (typeof address.contextSummary === "string" && address.contextSummary) {
+          row.appendChild(element(document, "span", "analysis-ca-context", address.contextSummary));
+        }
+        const sources = analysisSourceIDs(address);
+        if (sources.length) {
+          row.appendChild(element(document, "span", "source-reference", `来源 ${sources.join(" · ")}`));
+        }
+        addressList.appendChild(row);
+      }
+      if (addressList.children.length) {
+        result.appendChild(addressList);
+      }
+    }
+    const sourceList = AnalysisSourceList(document, item.sourceMessages, item.jobId);
+    if (sourceList) {
+      const disclosure = element(document, "details", "relay-provenance");
+      disclosure.setAttribute("data-disclosure-key", `report/${item.jobId}`);
+      disclosure.appendChild(element(document, "summary", "", "查看报告来源"));
+      disclosure.appendChild(sourceList);
+      result.appendChild(disclosure);
     }
     details.appendChild(result);
   }
   split.appendChild(details);
   page.content.appendChild(split);
-  return cleanup;
-}
-
-export function renderMeme({ root, payload, api }) {
-  const page = begin(root, "Meme 观察", "观察池中的跨群信号与已记录链上行情", payload);
-  if (page.unavailable) {
-    return cleanup;
-  }
-  const document = page.document;
-  const collection = items(payload);
-  if (appendEmptyIfNeeded(document, page.content, collection, "观察池暂无记录")) {
-    return cleanup;
-  }
-  const grid = element(document, "div", "watch-grid");
-  for (const item of collection) {
-    const card = element(document, "article", "watch-card");
-    const header = element(document, "div", "record-card-header");
-    header.appendChild(element(document, "h2", "record-title", item.symbol || item.name || "未命名代币"));
-    header.appendChild(StatusPill(document, item.network || item.family || "未知网络", "neutral"));
-    if (item.isPinned) {
-      header.appendChild(StatusPill(document, "置顶", "ready"));
-    }
-    card.appendChild(header);
-    if (item.name) {
-      card.appendChild(element(document, "p", "record-body", item.name));
-    }
-    const metrics = element(document, "div", "metric-grid compact");
-    metrics.appendChild(MetricCard(document, "价格", formatMoney(item.priceUsd)));
-    metrics.appendChild(MetricCard(document, "市值", formatMoney(item.marketCapUsd)));
-    metrics.appendChild(MetricCard(document, "流动性", formatMoney(item.liquidityUsd)));
-    card.appendChild(metrics);
-    card.appendChild(
-      keyValueGrid(document, [
-        ["群聊热度", `${formatValue(item.mentionCount)} 次提及 · ${Array.isArray(item.groupNames) ? item.groupNames.length : 0} 个群`],
-        ["数据窗口", "持久化观察窗口"],
-        ["出现群聊", item.groupNames],
-        ["最近出现", formatDate(item.latestSeenAt)],
-        ["观察状态", item.state],
-      ])
-    );
-    if (item.address) {
-      card.appendChild(AddressControl(document, item.address, api));
-    }
-    grid.appendChild(card);
-  }
-  page.content.appendChild(grid);
-  return cleanup;
-}
-
-export function renderMarket({ root, payload, api }) {
-  void api;
-  const page = begin(root, "市场趋势", "Mac 后台已持久化的多链趋势记录", payload);
-  if (page.unavailable) {
-    return cleanup;
-  }
-  const document = page.document;
-  const collection = items(payload);
-  const tabs = element(document, "div", "workspace-toolbar chain-tabs");
-  const chains = ["全部", ...new Set(collection.map((item) => item.network).filter(Boolean))];
-  const tabButtons = [];
-  const table = element(document, "div", "trend-table");
-
-  function draw(chain) {
-    const displayed = chain === "全部"
-      ? collection
-      : collection.filter((item) => item.network === chain);
-    table.replaceChildren();
-    for (const entry of tabButtons) {
-      entry.button.className = entry.chain === chain ? "readonly-tab active" : "readonly-tab";
-    }
-    if (!displayed.length) {
-      table.appendChild(EmptyState(document, "暂无市场趋势记录"));
-      return;
-    }
-    for (const item of displayed) {
-      const row = element(document, "article", "trend-row");
-      row.appendChild(element(document, "strong", "trend-symbol", item.symbol || item.name || "—"));
-      row.appendChild(StatusPill(document, item.network || "未知网络", "neutral"));
-      row.appendChild(element(document, "span", "trend-value", formatMoney(item.priceUsd)));
-      row.appendChild(element(document, "span", "trend-value", formatMoney(item.marketCapUsd)));
-      row.appendChild(element(document, "span", "trend-value", formatMoney(item.liquidityUsd)));
-      row.appendChild(element(document, "time", "record-time", formatDate(item.capturedAt)));
-      table.appendChild(row);
-    }
-  }
-
-  for (const chain of chains) {
-    const tab = element(document, "button", "readonly-tab", chain);
-    tab.type = "button";
-    tab.setAttribute("data-readonly-filter", chain);
-    tab.addEventListener("click", () => draw(chain));
-    tabButtons.push({ button: tab, chain });
-    tabs.appendChild(tab);
-  }
-  page.content.appendChild(tabs);
-  page.content.appendChild(table);
-  draw("全部");
   return cleanup;
 }
 
@@ -624,7 +733,9 @@ function actionSummary(document, actions) {
       item.appendChild(element(document, "span", "action-title", safe.tag));
     }
     for (const detail of [
-      ["级别", safe.severity],
+      ["级别", safe.severity === "critical" || safe.severity === "warning"
+        ? `${severityLabel(safe.severity)}（${safe.severity}）`
+        : safe.severity],
       ["配置", safe.configurationId],
       ["脚本", safe.scriptId],
     ]) {
@@ -669,195 +780,23 @@ export function renderRules({ root, payload, api }) {
   return cleanup;
 }
 
-export function renderTrading({ root, payload, api }) {
-  const page = begin(root, "交易工作台", "钱包安全状态、交易意图与历史记录", payload);
-  if (page.unavailable) {
-    return cleanup;
-  }
-  const document = page.document;
-  const summary = element(document, "div", "metric-grid");
-  const settingsDependency = object(payload.settingsDependency);
-  const walletSafeStatus = settingsDependency.available === false
-    ? sourceReasonLabel(settingsDependency.reason)
-    : payload.walletSafeStatus || "签名材料不会发送到浏览器";
-  summary.appendChild(
-    MetricCard(document, "钱包安全", walletSafeStatus, "仅显示后台记录状态")
-  );
-  summary.appendChild(MetricCard(document, "交易记录", items(payload).length));
-  page.content.appendChild(summary);
-  const collection = items(payload);
-  if (appendEmptyIfNeeded(document, page.content, collection, "还没有交易记录")) {
-    return cleanup;
-  }
-  const records = section(document, "交易意图与历史", "只显示 Mac 后台已记录状态");
-  for (const item of collection) {
-    const card = element(document, "article", "record-card trade-card");
-    const header = element(document, "div", "record-card-header");
-    header.appendChild(element(document, "h3", "record-title", item.symbol || item.tokenName || item.intentId || "交易意图"));
-    header.appendChild(StatusPill(document, item.state || "unknown", statusKind(item.state)));
-    header.appendChild(element(document, "time", "record-time", formatDate(item.updatedAt)));
-    card.appendChild(header);
-    card.appendChild(
-      keyValueGrid(document, [
-        ["网络", item.network || item.chain],
-        ["预计金额", formatMoney(item.estimatedSpendUsd)],
-        ["原因", item.reason],
-        ["风险比率", object(item.riskSummary).rugRatio],
-      ])
-    );
-    if (item.tokenAddress) {
-      card.appendChild(AddressControl(document, item.tokenAddress, api));
-    }
-    records.appendChild(card);
-  }
-  page.content.appendChild(records);
-  return cleanup;
-}
-
-function automationRiskValues(item) {
-  const condition = object(item.condition);
-  const action = Array.isArray(item.actions) && item.actions.length ? object(item.actions[0]) : {};
-  return [
-    ["允许链", condition.allowedChains],
-    ["群聊范围", condition.groups],
-    ["发送者范围", condition.senders],
-    ["聚合窗口（秒）", condition.aggregationWindowSeconds],
-    ["最低提及数", condition.minimumMentions],
-    ["最低群数", condition.minimumDistinctGroups],
-    ["最低市值", formatMoney(condition.minimumMarketCapUSD)],
-    ["最高市值", formatMoney(condition.maximumMarketCapUSD)],
-    ["最低流动性", formatMoney(condition.minimumLiquidityUSD)],
-    ["最低持有人数", condition.minimumHolderCount],
-    ["最大风险比", condition.maximumRugRatio],
-    ["要求安全数据", condition.requireSecurityData],
-    ["投入原生币", action.inputAmountNative],
-    ["Anti-MEV", action.antiMEV],
-    ["每日上限", action.maximumTradesPerDay],
-    ["最大滑点", action.maximumSlippagePercent],
-    ["冷却（秒）", action.tokenCooldownSeconds],
-  ];
-}
-
-export function renderAutomations({ root, payload, api }) {
-  void api;
-  const page = begin(root, "自动化交易", "配置状态、规则、风控与最近意图状态", payload);
-  if (page.unavailable) {
-    return cleanup;
-  }
-  const document = page.document;
-  const settingsDependency = object(payload.settingsDependency);
-  const configurationStatus = settingsDependency.available === false
-    ? sourceReasonLabel(settingsDependency.reason)
-    : payload.configurationStatus === true
-      ? "已配置"
-      : "未配置";
-  page.content.appendChild(
-    MetricCard(
-      document,
-      "自动化配置",
-      configurationStatus,
-      "浏览器不会执行规则或模拟交易"
-    )
-  );
-  const collection = items(payload);
-  const rules = section(document, "规则与风控", `${collection.length} 条只读规则`);
-  if (!collection.length) {
-    rules.appendChild(EmptyState(document, "还没有自动化规则"));
-  }
-  for (const item of collection) {
-    const card = element(document, "article", "record-card automation-card");
-    const header = element(document, "div", "record-card-header");
-    header.appendChild(element(document, "h3", "record-title", item.name || item.ruleId || "自动化规则"));
-    header.appendChild(StatusPill(document, item.isEnabled ? "已启用" : "已停用", item.isEnabled ? "ready" : "neutral"));
-    card.appendChild(header);
-    card.appendChild(keyValueGrid(document, automationRiskValues(item)));
-    const action = Array.isArray(item.actions) && item.actions.length ? object(item.actions[0]) : {};
-    const orders = Array.isArray(action.protectionOrders) ? action.protectionOrders : [];
-    if (orders.length) {
-      card.appendChild(element(document, "h4", "record-subtitle", "保护单"));
-      const orderList = element(document, "ul", "action-list");
-      for (const rawOrder of orders) {
-        const order = object(rawOrder);
-        orderList.appendChild(
-          element(
-            document,
-            "li",
-            "action-item",
-            `${formatValue(order.id)} · ${formatValue(order.kind)} · 触发 ${formatValue(order.triggerPercent)}% · 卖出 ${formatValue(order.sellPercent)}%`
-          )
-        );
-      }
-      card.appendChild(orderList);
-    }
-    rules.appendChild(card);
-  }
-  page.content.appendChild(rules);
-  const recent = section(document, "最近意图状态", "仅展示已落库记录");
-  const tradesDependency = object(payload.tradesDependency);
-  const recentIntents = Array.isArray(payload.recentIntents) ? payload.recentIntents : [];
-  if (tradesDependency.available === false) {
-    recent.appendChild(EmptyState(document, sourceReasonLabel(tradesDependency.reason)));
-  } else if (!recentIntents.length) {
-    recent.appendChild(EmptyState(document, "暂无最近意图"));
-  }
-  for (const intent of recentIntents.slice(0, 8)) {
-    const row = element(document, "div", "intent-row");
-    row.appendChild(element(document, "span", "intent-name", intent.symbol || intent.intentId || "交易意图"));
-    row.appendChild(StatusPill(document, intent.state || "unknown", statusKind(intent.state)));
-    row.appendChild(element(document, "time", "record-time", formatDate(intent.updatedAt)));
-    recent.appendChild(row);
-  }
-  page.content.appendChild(recent);
-  return cleanup;
-}
-
-export function renderSounds({ root, payload, api }) {
-  void api;
-  const page = begin(root, "声音与提醒", "仅显示 Mac 后台配置状态", payload);
-  if (page.unavailable) {
-    return cleanup;
-  }
-  const document = page.document;
-  const grid = element(document, "div", "metric-grid");
-  grid.appendChild(MetricCard(document, "语音服务", booleanLabel(payload.speechConfigured)));
-  grid.appendChild(MetricCard(document, "AI 摘要服务", booleanLabel(payload.aiConfigured)));
-  page.content.appendChild(grid);
-  page.content.appendChild(
-    ReadonlyControl(document, "声音规则", "请在 Mac wxFomo 中查看和修改")
-  );
-  return cleanup;
-}
-
 export function renderProviders({ root, payload, api }) {
   void api;
-  const page = begin(root, "配置中心", "只显示服务名称与配置状态，不传输凭据", payload);
+  const page = begin(root, "配置中心", "仅显示 MiniMax 模型与配置状态，不传输凭据", payload);
   if (page.unavailable) {
     return cleanup;
   }
   const document = page.document;
-  const providers = Array.isArray(payload.providerNames) ? payload.providerNames : [];
-  const checklist = section(document, "首次使用检查", "Windows 端只显示布尔结果");
-  checklist.appendChild(ReadonlyControl(document, "AI 模型服务", booleanLabel(payload.aiConfigured)));
-  checklist.appendChild(ReadonlyControl(document, "语音服务", booleanLabel(payload.speechConfigured)));
-  checklist.appendChild(ReadonlyControl(document, "交易服务", booleanLabel(payload.tradingConfigured)));
-  page.content.appendChild(checklist);
-
-  const providerSection = section(document, "AI 模型服务", `${providers.length} 个已知显示名称`);
-  if (!providers.length) {
-    providerSection.appendChild(EmptyState(document, "还没有 AI 模型服务"));
-  }
-  for (const name of providers) {
-    const card = element(document, "article", "provider-card");
-    card.appendChild(element(document, "h3", "record-title", name));
-    card.appendChild(StatusPill(document, payload.aiConfigured ? "已配置" : "未配置", payload.aiConfigured ? "ready" : "neutral"));
-    card.appendChild(ReadonlyControl(document, "API Key", "••••••••"));
-    providerSection.appendChild(card);
-  }
+  const providerSection = section(document, "MiniMax 分析服务", "浏览器不会显示或读取凭据内容");
+  const card = element(document, "article", "provider-card");
+  card.appendChild(element(document, "h3", "record-title", "MiniMax-M2.7"));
+  card.appendChild(StatusPill(
+    document,
+    payload.aiConfigured === true ? "已配置" : "未配置",
+    payload.aiConfigured === true ? "ready" : "neutral"
+  ));
+  providerSection.appendChild(card);
   page.content.appendChild(providerSection);
-  const speech = section(document, "真人语音 / TTS", "仅显示服务是否已配置");
-  speech.appendChild(ReadonlyControl(document, "语音 Key", "••••••••"));
-  speech.appendChild(StatusPill(document, payload.speechConfigured ? "已配置" : "未配置", payload.speechConfigured ? "ready" : "neutral"));
-  page.content.appendChild(speech);
   return cleanup;
 }
 
@@ -901,8 +840,7 @@ export function renderDiagnostics({ root, payload, api }) {
   const document = page.document;
   const rows = section(document, "只读数据源", "不会显示完整本地路径");
   rows.appendChild(ReadonlyControl(document, "消息数据库", sourceStatus(payload, "messages")));
-  rows.appendChild(ReadonlyControl(document, "工作区数据库（可选）", sourceStatus(payload, "workspace")));
-  rows.appendChild(ReadonlyControl(document, "配置摘要", sourceStatus(payload, "configuration")));
+  rows.appendChild(ReadonlyControl(document, "分析数据库", sourceStatus(payload, "analysis")));
   rows.appendChild(ReadonlyControl(document, "监听活动", listenerStateLabel(payload.listenerState)));
   const messagesDependency = object(payload.messagesDependency);
   const lastMessageStatus = messagesDependency.available === false
@@ -911,8 +849,29 @@ export function renderDiagnostics({ root, payload, api }) {
       ? formatDate(payload.lastMessageAt)
       : "尚无记录";
   rows.appendChild(ReadonlyControl(document, "最近消息", lastMessageStatus));
+  rows.appendChild(ReadonlyControl(document, "规则匹配", sourceStatus(payload, "ruleMatches")));
+  rows.appendChild(ReadonlyControl(document, "分析任务", sourceStatus(payload, "analysisJobs")));
   rows.appendChild(ReadonlyControl(document, "API 模式", "GET / HEAD 只读"));
   page.content.appendChild(rows);
+
+  const worker = object(payload.analysisWorker);
+  const jobCounts = object(payload.jobCounts);
+  if (Object.keys(worker).length || Object.keys(jobCounts).length) {
+    const analysis = section(document, "MiniMax 分析", "后台运行与已记录任务状态");
+    analysis.appendChild(ReadonlyControl(document, "分析工作器", worker.active === true ? "活动中" : "未活动"));
+    const labels = [
+      ["等待执行", jobCounts.queued], ["正在分析", jobCounts.running],
+      ["等待重试", jobCounts.retryWait], ["需要配置凭据", jobCounts.credentialRequired],
+      ["执行失败", jobCounts.failed], ["已完成", jobCounts.succeeded],
+      ["窗口无消息", jobCounts.skippedEmpty],
+    ];
+    for (const [label, count] of labels) {
+      if (Number.isInteger(count) && count >= 0) {
+        analysis.appendChild(ReadonlyControl(document, label, count));
+      }
+    }
+    page.content.appendChild(analysis);
+  }
 
   const errors = safeRetriableErrors(payload.retriableErrors);
   const errorSection = section(document, "可重试错误", errors.length ? `${errors.length} 项` : "无");
@@ -945,6 +904,10 @@ export function renderPriority({ root, payload, api }) {
   const list = element(document, "ol", "record-list priority-list");
   for (const item of collection) {
     const card = element(document, "li", "record-card priority-card");
+    const badges = RuleAnnotationBadges(document, item);
+    if (badges) {
+      card.appendChild(badges);
+    }
     card.appendChild(element(document, "h2", "record-title", item.content || "重点消息"));
     card.appendChild(
       keyValueGrid(document, [
@@ -960,13 +923,8 @@ export function renderPriority({ root, payload, api }) {
 }
 
 export const WORKSPACE_PAGES = Object.freeze([
-  { id: "meme", label: "Meme 观察", icon: "pulse", endpoint: "/api/meme", render: renderMeme, readOnly: true },
-  { id: "market", label: "市场趋势", icon: "chart", endpoint: "/api/market", render: renderMarket, readOnly: true },
   { id: "analyses", label: "分析记录", icon: "analysis", endpoint: "/api/analyses", render: renderAnalyses, readOnly: true },
   { id: "rules", label: "监控规则", icon: "rules", endpoint: "/api/rules", render: renderRules, readOnly: true },
-  { id: "trading", label: "交易工作台", icon: "trade", endpoint: "/api/trades", render: renderTrading, readOnly: true },
-  { id: "automations", label: "自动化交易", icon: "automation", endpoint: "/api/automations", render: renderAutomations, readOnly: true },
-  { id: "sounds", label: "声音与提醒", icon: "sound", endpoint: "/api/settings/status", render: renderSounds, readOnly: true },
   { id: "providers", label: "配置中心", icon: "settings", endpoint: "/api/settings/status", render: renderProviders, readOnly: true },
   { id: "diagnostics", label: "运行诊断", icon: "diagnostics", endpoint: "/api/diagnostics", render: renderDiagnostics, readOnly: true },
 ]);

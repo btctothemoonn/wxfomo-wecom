@@ -14,7 +14,7 @@ from wxfomo_lan.server import PUBLIC_ASSETS, ServerOptions, create_server
 
 APPLICATION_SUPPORT = os.path.expanduser("~/Library/Application Support")
 LAN_SUPPORT = os.path.join(APPLICATION_SUPPORT, "wxFomo LAN")
-WX_FOMO_SUPPORT = os.path.join(APPLICATION_SUPPORT, "wxFomo")
+ANALYSIS_DATABASE = os.path.join(LAN_SUPPORT, "analysis.sqlite3")
 REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_ROOT = os.path.join(REPOSITORY_ROOT, "web", "wxfomo-lan")
 GROUP_CONFIG = os.path.expanduser("~/.config/wxfomo/wecom-groups.txt")
@@ -80,16 +80,19 @@ def build_parser():
         "--database", metavar="PATH", default=os.path.join(LAN_SUPPORT, "messages.sqlite3")
     )
     parser.add_argument("--notification-database", metavar="PATH")
+    parser.add_argument(
+        "--analysis-database", metavar="PATH", default=ANALYSIS_DATABASE
+    )
     parser.add_argument("--group-config", metavar="PATH", default=GROUP_CONFIG)
     parser.add_argument(
         "--workspace-database",
         metavar="PATH",
-        default=os.path.join(WX_FOMO_SUPPORT, "workspace.sqlite3"),
+        default="",
     )
     parser.add_argument(
         "--configuration",
         metavar="PATH",
-        default=os.path.join(WX_FOMO_SUPPORT, "configuration-center.json"),
+        default="",
     )
     parser.add_argument(
         "--token-file", metavar="PATH", default=os.path.join(LAN_SUPPORT, "access-token")
@@ -125,6 +128,7 @@ def parse_options(arguments=None):
         parser.error("--tls-cert and --tls-key must be provided together")
     sensitive_paths = (
         parsed.notification_database,
+        parsed.analysis_database,
         parsed.database,
         parsed.workspace_database,
         parsed.configuration,
@@ -149,6 +153,7 @@ def main(arguments=None):
         group_config_path=parsed.group_config,
         workspace_database=parsed.workspace_database,
         configuration_path=parsed.configuration,
+        analysis_database=parsed.analysis_database,
         notification_database=parsed.notification_database or "",
         token_path=parsed.token_file,
         tls_key_path=parsed.tls_key or "",

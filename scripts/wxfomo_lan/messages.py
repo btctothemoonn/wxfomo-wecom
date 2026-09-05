@@ -1,6 +1,7 @@
 """Read-only access to the private wxFomo message store."""
 
 import base64
+import copy
 import datetime
 import errno
 import json
@@ -13,6 +14,7 @@ import time
 import urllib.parse
 
 from .security import public_https_links
+from .relay import attribute_message, load_boundary
 
 
 DEFAULT_LIMIT = 50
@@ -35,7 +37,7 @@ _BOOTSTRAP_SCHEMA = {
         "source_sequence",
     },
 }
-_MESSAGE_SCHEMA = {"messages": _BOOTSTRAP_SCHEMA["messages"]}
+_MESSAGE_SCHEMA = {"messages": _BOOTSTRAP_SCHEMA["messages"] | {"id"}}
 
 
 class InvalidCursor(ValueError):
@@ -48,6 +50,24 @@ class MessageSourceUnavailable(Exception):
     def __init__(self, reason):
         super().__init__(reason)
         self.reason = reason
+
+
+def merge_message_annotations(items, annotations):
+    """Return copied message DTOs with only persisted annotations added."""
+    result = []
+    safe_annotations = annotations if isinstance(annotations, dict) else {}
+    for source in items:
+        item = copy.deepcopy(source)
+        annotation = safe_annotations.get(item.get("eventId"))
+        if isinstance(annotation, dict):
+            for name in (
+                "tags", "matchedRules", "priority", "severity", "matchedTerms"
+            ):
+                if name in annotation:
+                    value = annotation[name]
+                    item[name] = copy.deepcopy(value)
+        result.append(item)
+    return result
 
 
 def encode_cursor(observed_at, event_id):
@@ -179,6 +199,7 @@ class MessageRepository:
     def __init__(self, database_path, group_config_path):
         self.database_path = database_path
         self.group_config_path = group_config_path
+        self.relay_boundary = load_boundary(database_path)
 
     def _open(self):
         uri = "file:{}?mode=ro".format(
@@ -365,7 +386,7 @@ class MessageRepository:
 
         direction = "ASC" if after is not None else "DESC"
         statement = """
-            SELECT event_id, group_name, sender_display_name, content, message_type,
+            SELECT id, event_id, group_name, sender_display_name, content, message_type,
                    observed_at, source_sequence
             FROM messages
         """
@@ -438,7 +459,7 @@ class MessageRepository:
                 placeholders = ",".join("?" for _item in chunk)
                 rows = connection.execute(
                     """
-                    SELECT event_id, group_name, sender_display_name, content,
+                    SELECT id, event_id, group_name, sender_display_name, content,
                            message_type, observed_at, source_sequence
                     FROM messages
                     WHERE event_id IN ({})
@@ -458,7 +479,7 @@ class MessageRepository:
                         """
                     alias_rows = connection.execute(
                         """
-                        SELECT aliases.alias_event_id AS event_id,
+                        SELECT messages.id, aliases.alias_event_id AS event_id,
                                messages.group_name, messages.sender_display_name,
                                messages.content, messages.message_type,
                                messages.observed_at, messages.source_sequence
@@ -496,8 +517,7 @@ class MessageRepository:
             return DEFAULT_LIMIT
         return max(1, min(parsed, MAX_LIMIT))
 
-    @staticmethod
-    def _message_dto(row):
+    def _message_dto(self, row):
         result = {
             "eventId": row["event_id"],
             "group": row["group_name"],
@@ -510,4 +530,4 @@ class MessageRepository:
         links = public_https_links(row["content"])
         if links:
             result["links"] = links
-        return result
+        return attribute_message(result, row["id"], self.relay_boundary, "sender")

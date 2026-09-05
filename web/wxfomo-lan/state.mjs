@@ -2,6 +2,34 @@ const INBOX_ROUTE = Object.freeze({ page: "inbox" });
 const LISTENER_HEARTBEAT_TTL_MS = 5000;
 const LISTENER_HEARTBEAT_FUTURE_TOLERANCE_MS = 1000;
 
+function safeStringList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item) => typeof item === "string" && item.length > 0);
+}
+
+export function normalizeReadOnlyPayload(pageId, payload) {
+  if (pageId !== "analyses" || !payload || !Array.isArray(payload.items)) {
+    return payload;
+  }
+  return {
+    ...payload,
+    items: payload.items.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return item;
+      }
+      const sources = safeStringList(item.summarySourceMessageIDs).length
+        ? safeStringList(item.summarySourceMessageIDs)
+        : safeStringList(item.sourceReferences);
+      return {
+        ...item,
+        summarySourceMessageIDs: sources,
+      };
+    }),
+  };
+}
+
 export function boundedRetryDelay(attempt, base = 2000, cap = 30000) {
   const normalizedAttempt = Math.max(0, Math.floor(Number(attempt) || 0));
   return Math.min(cap, base * Math.pow(2, normalizedAttempt));
@@ -9,10 +37,6 @@ export function boundedRetryDelay(attempt, base = 2000, cap = 30000) {
 
 export function isRetriableWorkspaceReason(reason) {
   return reason === "source_locked";
-}
-
-function isRetriableTradesReason(reason) {
-  return ["source_locked", "schema_incompatible", "source_corrupt"].includes(reason);
 }
 
 function unavailableDependency(payload, predicate) {
@@ -28,12 +52,8 @@ export function isRetriableReadOnlyPayload(payload) {
   if (!payload || typeof payload !== "object") {
     return false;
   }
-  const settingsDependency = payload.settingsDependency;
-  const tradesDependency = payload.tradesDependency;
   const messagesDependency = payload.messagesDependency;
   return isRetriableWorkspaceReason(payload.reason)
-    || unavailableDependency(settingsDependency, isRetriableWorkspaceReason)
-    || unavailableDependency(tradesDependency, isRetriableTradesReason)
     || unavailableDependency(messagesDependency, () => true);
 }
 
@@ -48,45 +68,6 @@ function normalizedDependency(payload) {
         ? source.reason
         : "source_unavailable",
   };
-}
-
-export function composeReadOnlyPagePayload(pageId, primary, related, settings) {
-  const source = primary && typeof primary === "object" ? primary : {};
-  const settingsPayload = settings && typeof settings === "object" ? settings : {};
-  const settingsAvailable = settingsPayload.available === true;
-  const settingsDependency = {
-    available: settingsAvailable,
-    reason: settingsAvailable
-      ? null
-      : typeof settingsPayload.reason === "string" && settingsPayload.reason
-        ? settingsPayload.reason
-        : "source_unavailable",
-  };
-  if (pageId === "automations") {
-    const relatedPayload = related && typeof related === "object" ? related : {};
-    const tradesDependency = normalizedDependency(relatedPayload);
-    return {
-      ...source,
-      recentIntents: Array.isArray(relatedPayload.items) ? relatedPayload.items : [],
-      configurationStatus: settingsAvailable
-        ? settingsPayload.tradingConfigured === true
-        : null,
-      settingsDependency,
-      tradesDependency,
-    };
-  }
-  if (pageId === "trading") {
-    return {
-      ...source,
-      walletSafeStatus: settingsAvailable
-        ? settingsPayload.tradingConfigured
-          ? "交易配置存在 · 私钥未下发"
-          : "交易配置未启用 · 私钥未下发"
-        : null,
-      settingsDependency,
-    };
-  }
-  throw new Error("unsupported_composite_page");
 }
 
 export function composeDiagnosticsPagePayload(primary, messages) {
@@ -138,8 +119,6 @@ export function diagnosticsPrimaryFailurePayload(previous, reason) {
     reason: null,
     items: [],
     sources: {
-      workspace: { available: false, reason: normalizedReason },
-      configuration: { available: false, reason: normalizedReason },
     },
     listenerState: "unknown",
     lastMessageAt: null,
@@ -166,11 +145,7 @@ export function retainReadOnlyPayload(previous, next) {
       return retained;
     }
     let retained = previous;
-    for (const dependency of [
-      "settingsDependency",
-      "tradesDependency",
-      "messagesDependency",
-    ]) {
+    for (const dependency of ["messagesDependency"]) {
       if (Object.prototype.hasOwnProperty.call(next, dependency)) {
         if (retained === previous) {
           retained = { ...previous };

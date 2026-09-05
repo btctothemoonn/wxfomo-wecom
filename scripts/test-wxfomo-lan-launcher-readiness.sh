@@ -110,6 +110,8 @@ prepare_common_fixture() {
   group_config="$fixture_dir/$prefix-groups.txt"
   workspace_database="$fixture_dir/$prefix-missing-workspace.sqlite3"
   configuration="$fixture_dir/$prefix-missing-configuration.json"
+  analysis_database="$fixture_dir/$prefix-analysis.sqlite3"
+  ai_credentials="$fixture_dir/$prefix-missing-ai-credentials.json"
   token_directory="$fixture_dir/$prefix-token"
   token_file="$token_directory/access-token"
   launcher_log="$fixture_dir/$prefix-launcher.log"
@@ -126,10 +128,15 @@ copy_launcher_layout() {
   /bin/mkdir -m 0700 -p "$target/scripts" "$target/web/wxfomo-lan"
   /bin/cp "$script_dir/start-wxfomo-lan.sh" "$target/scripts/"
   /bin/cp "$script_dir/wecom-group-listener.swift" "$target/scripts/"
+  /bin/cp "$script_dir/wxfomo-analysis-worker.py" "$target/scripts/"
+  /bin/cp "$script_dir/configure-wxfomo-ai.py" "$target/scripts/"
+  /bin/cp "$script_dir/configure-wxfomo-ai.command" "$target/scripts/"
   /bin/cp -R "$script_dir/wxfomo_lan" "$target/scripts/"
   /bin/chmod 0700 \
     "$target/scripts/start-wxfomo-lan.sh" \
-    "$target/scripts/wecom-group-listener.swift"
+    "$target/scripts/wecom-group-listener.swift" \
+    "$target/scripts/wxfomo-analysis-worker.py" \
+    "$target/scripts/configure-wxfomo-ai.command"
 }
 
 assert_launcher_does_not_report_ready() {
@@ -141,6 +148,8 @@ assert_launcher_does_not_report_ready() {
     --notification-database "$source_database" \
     --group-config "$group_config" \
     --message-database "$message_database" \
+    --analysis-database "$analysis_database" \
+    --ai-credentials "$ai_credentials" \
     --workspace-database "$workspace_database" \
     --configuration "$configuration" \
     --token-file "$token_file" \
@@ -160,7 +169,8 @@ assert_launcher_does_not_report_ready() {
 }
 
 case_to_run=${1:-all}
-[[ "$case_to_run" == all || "$case_to_run" == foreign || "$case_to_run" == static ]] \
+[[ "$case_to_run" == all || "$case_to_run" == foreign || "$case_to_run" == static \
+  || "$case_to_run" == worker-storage ]] \
   || fail "unknown readiness test case: $case_to_run"
 
 if [[ "$case_to_run" == all || "$case_to_run" == foreign ]]; then
@@ -191,6 +201,24 @@ PY
     "$foreign_layout/scripts/start-wxfomo-lan.sh" "foreign-port" "$port"
   stop_managed_pid "$foreign_owner_pid"
   print -- "PASS: launcher rejects readiness served by a foreign PID"
+fi
+
+if [[ "$case_to_run" == all || "$case_to_run" == worker-storage ]]; then
+  prepare_common_fixture worker-storage
+  port=$(random_port)
+  worker_storage_layout="$fixture_dir/worker-storage-layout"
+  copy_launcher_layout "$worker_storage_layout"
+  /bin/cp "$script_dir/wxfomo-lan-server.py" "$worker_storage_layout/scripts/"
+  /bin/cp -R "$repository_root/web/wxfomo-lan/." "$worker_storage_layout/web/wxfomo-lan/"
+  unsafe_analysis_parent="$fixture_dir/worker-storage-shared"
+  /bin/mkdir -m 0755 "$unsafe_analysis_parent"
+  analysis_database="$unsafe_analysis_parent/analysis.sqlite3"
+
+  assert_launcher_does_not_report_ready \
+    "$worker_storage_layout/scripts/start-wxfomo-lan.sh" "worker-storage" "$port"
+  /usr/bin/grep -Fq -- '"event":"worker_stopped"' "$launcher_log" \
+    || fail "worker storage failure was not visible in the launcher log"
+  print -- "PASS: launcher requires a healthy analysis worker before readiness"
 fi
 
 if [[ "$case_to_run" == all || "$case_to_run" == static ]]; then

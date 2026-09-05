@@ -8,9 +8,12 @@ import stat
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .messages import InvalidCursor, MessageRepository, MessageSourceUnavailable
+from .analysis import AnalysisRepository
+from .messages import (
+    InvalidCursor, MessageRepository, MessageSourceUnavailable,
+    merge_message_annotations,
+)
 from .security import authorized
-from .workspace import WorkspaceRepository
 
 
 SECURITY_HEADERS = {
@@ -43,8 +46,10 @@ class ServerOptions:
     static_root: str
     message_database: str
     group_config_path: str
-    workspace_database: str
-    configuration_path: str
+    # Deprecated CLI compatibility; never read. Still deny access as sensitive paths.
+    workspace_database: str = ""
+    configuration_path: str = ""
+    analysis_database: str = ""
     notification_database: str = ""
     token_path: str = ""
     tls_key_path: str = ""
@@ -60,13 +65,15 @@ def build_handler(options):
             options.group_config_path,
             options.workspace_database,
             options.configuration_path,
+            options.analysis_database,
             options.token_path,
             options.tls_key_path,
         )
         if path
     )
     messages = MessageRepository(options.message_database, options.group_config_path)
-    workspace = WorkspaceRepository(options.workspace_database, options.configuration_path)
+    analysis = AnalysisRepository(options.analysis_database)
+    analysis_enabled = bool(options.analysis_database)
 
     class ReadOnlyHandler(BaseHTTPRequestHandler):
         def __getattr__(self, name):
@@ -151,10 +158,17 @@ def build_handler(options):
                         send_body,
                     )
                     return
+                if analysis_enabled:
+                    payload["items"] = merge_message_annotations(
+                        payload["items"],
+                        analysis.annotations(
+                            [item["eventId"] for item in payload["items"]]
+                        ),
+                    )
                 self._send_json(200, payload, send_body)
                 return
             if path == "/api/alerts":
-                payload = workspace.alerts()
+                payload = analysis.alerts()
                 if payload.get("available") and isinstance(payload.get("items"), list):
                     event_ids = []
                     for alert in payload["items"]:
@@ -163,6 +177,13 @@ def build_handler(options):
                         source_messages = messages.by_event_ids(event_ids)
                     except MessageSourceUnavailable:
                         source_messages = []
+                    if analysis_enabled:
+                        source_messages = merge_message_annotations(
+                            source_messages,
+                            analysis.annotations(
+                                [message["eventId"] for message in source_messages]
+                            ),
+                        )
                     messages_by_id = {
                         message["eventId"]: message for message in source_messages
                     }
@@ -174,22 +195,31 @@ def build_handler(options):
                         ]
                 self._send_json(200, payload, send_body)
                 return
-            workspace_routes = {
-                "/api/analyses": workspace.analyses,
-                "/api/priority": workspace.priority,
-                "/api/meme": workspace.meme,
-                "/api/market": workspace.market,
-                "/api/rules": workspace.rules,
-                "/api/automations": workspace.automations,
-                "/api/trades": workspace.trades,
-                "/api/settings/status": workspace.settings_status,
-            }
-            if path in workspace_routes:
-                self._send_json(200, workspace_routes[path](), send_body)
+            if path == "/api/priority":
+                payload = analysis.priority(messages)
+                self._send_json(200, payload, send_body)
+                return
+            if path == "/api/analyses":
+                payload = analysis.analyses(messages)
+                self._send_json(200, payload, send_body)
+                return
+            if path == "/api/rules":
+                payload = analysis.rules()
+                self._send_json(200, payload, send_body)
+                return
+            if path == "/api/settings/status":
+                self._send_json(200, analysis.settings_status(), send_body)
                 return
             if path == "/api/diagnostics":
                 message_source = messages.bootstrap()["messageSource"]
-                self._send_json(200, workspace.diagnostics(message_source), send_body)
+                payload = analysis.diagnostics()
+                payload["sources"]["messages"] = {
+                    "available": bool(message_source.get("available")),
+                    "reason": message_source.get("reason")
+                    if not message_source.get("available") else None,
+                }
+                payload["listenerState"] = message_source.get("listenerState", "unknown")
+                self._send_json(200, payload, send_body)
                 return
             self._send_json(404, {"error": "not_found"}, send_body)
 

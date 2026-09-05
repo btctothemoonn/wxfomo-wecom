@@ -17,14 +17,15 @@ from html.parser import HTMLParser
 from unittest import mock
 
 from scripts.wxfomo_lan import security
+from scripts.wxfomo_lan.analysis import AnalysisRepository
 from scripts.wxfomo_lan.messages import (
     MessageRepository,
     MessageSourceUnavailable,
     decode_cursor,
     encode_cursor,
+    merge_message_annotations,
 )
 from scripts.wxfomo_lan.server import ServerOptions, create_server
-from scripts.wxfomo_lan.workspace import WorkspaceRepository
 
 
 class FrontendSecurityParser(HTMLParser):
@@ -57,6 +58,53 @@ def load_cli_module():
 
 
 class LanServerTests(unittest.TestCase):
+    def test_analysis_list_is_recent_thirty_without_deleting_history(self):
+        path = os.path.join(self.temporary_directory.name, 'bounded-analysis.sqlite3')
+        self.create_analysis_fixture(path)
+        with sqlite3.connect(path) as connection:
+            for index in range(35):
+                connection.execute(
+                    "INSERT INTO analysis_jobs SELECT ?, cadence, window_start, "
+                    "window_end, state, source_event_ids_json, attempt, maximum_attempts, "
+                    "next_attempt_at, error_code, credential_file_revision, created_at, updated_at "
+                    "FROM analysis_jobs WHERE job_id='job-analysis-1'", ('copy-{}'.format(index),))
+        payload = AnalysisRepository(path).analyses(MessageRepository(self.message_database, self.group_config_path))
+        self.assertEqual(len(payload['items']), 30)
+        with sqlite3.connect(path) as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0], 36)
+
+    def test_ca_cards_use_full_frozen_scope_and_keep_sources(self):
+        path = os.path.join(self.temporary_directory.name, 'analysis-ca.sqlite3')
+        self.create_analysis_fixture(path)
+        address = '0x' + 'a' * 40
+        with sqlite3.connect(self.message_database) as connection:
+            connection.execute("UPDATE messages SET content=?, sender_display_name='猫'", ('Base: '+address,))
+            connection.execute("UPDATE messages SET group_name='另一个群' WHERE event_id='event-b'")
+        with sqlite3.connect(path) as connection:
+            connection.execute("UPDATE analysis_jobs SET source_event_ids_json=?", (json.dumps(['event-a','event-b','event-c']),))
+        report = AnalysisRepository(path).analyses(MessageRepository(self.message_database, self.group_config_path))['items'][0]
+        card = report['crossGroupCA']['items'][0]
+        self.assertEqual(card['mentionCount'], 3)
+        self.assertEqual(card['uniqueStatementCount'], 1)
+        self.assertTrue(report['crossGroupCA']['sourcesComplete'])
+        self.assertTrue(set(card['sourceMessageIDs']).issubset({m['eventId'] for m in report['sourceMessages']}))
+        with sqlite3.connect(self.message_database) as connection:
+            connection.execute("DELETE FROM messages WHERE event_id='event-b'")
+        partial = AnalysisRepository(path).analyses(MessageRepository(self.message_database, self.group_config_path))['items'][0]
+        self.assertFalse(partial['crossGroupCA']['sourcesComplete'])
+
+    def test_summary_lite_has_no_market_or_trading_apis(self):
+        for path in ('/api/meme', '/api/market', '/api/trades', '/api/automations'):
+            status, _, _ = self.request('GET', path, {'Authorization': 'Bearer test-token'})
+            self.assertEqual(status, 404, path)
+        settings = self.authorized_json('/api/settings/status')
+        self.assertNotIn('tradingConfigured', settings)
+        self.assertNotIn('speechConfigured', settings)
+        self.assertNotIn('nativeSettingsDependency', settings)
+        diagnostics = self.authorized_json('/api/diagnostics')
+        self.assertNotIn('workspace', diagnostics.get('sources', {}))
+        self.assertNotIn('configuration', diagnostics.get('sources', {}))
+
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
@@ -156,6 +204,719 @@ class LanServerTests(unittest.TestCase):
             ],
         )
         connection.commit()
+
+    def create_analysis_fixture(self, path):
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            """
+            CREATE TABLE analysis_worker_state(
+              singleton_id INTEGER PRIMARY KEY,
+              instance_id TEXT,
+              heartbeat_at REAL,
+              rule_cursor_time REAL,
+              rule_cursor_event_id TEXT,
+              rule_catalog_version INTEGER,
+              provider_not_before REAL,
+              credential_status TEXT,
+              last_provider_success_at REAL,
+              last_error_code TEXT,
+              updated_at REAL NOT NULL
+            );
+            CREATE TABLE message_rule_matches(
+              event_id TEXT NOT NULL,
+              rule_id TEXT NOT NULL,
+              priority INTEGER NOT NULL,
+              severity TEXT,
+              tags_json TEXT NOT NULL,
+              matched_terms_json TEXT NOT NULL,
+              created_at REAL NOT NULL
+            );
+            CREATE TABLE rule_alerts(
+              alert_id INTEGER PRIMARY KEY,
+              event_id TEXT NOT NULL,
+              rule_id TEXT NOT NULL,
+              severity TEXT NOT NULL,
+              title TEXT NOT NULL,
+              occurrence_count INTEGER NOT NULL,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
+            );
+            CREATE TABLE analysis_jobs(
+              job_id TEXT PRIMARY KEY,
+              cadence TEXT NOT NULL,
+              window_start REAL NOT NULL,
+              window_end REAL NOT NULL,
+              state TEXT NOT NULL,
+              source_event_ids_json TEXT NOT NULL,
+              attempt INTEGER NOT NULL,
+              maximum_attempts INTEGER NOT NULL,
+              next_attempt_at REAL,
+              error_code TEXT,
+              credential_file_revision TEXT,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
+            );
+            CREATE TABLE analysis_results(
+              analysis_id INTEGER PRIMARY KEY,
+              job_id TEXT NOT NULL,
+              result_json TEXT NOT NULL,
+              model TEXT,
+              provider_request_id TEXT,
+              input_tokens INTEGER,
+              output_tokens INTEGER,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO analysis_worker_state VALUES (1, ?, ?, ?, ?, 1, NULL, ?, ?, NULL, ?)",
+            (
+                "11111111-1111-4111-8111-111111111111",
+                time.time(),
+                1725256800,
+                "event-c",
+                "configured",
+                1725256810,
+                time.time(),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO message_rule_matches VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "event-c",
+                "recommended.risk.contract-liquidity",
+                50,
+                "critical",
+                '["\u9ad8\u98ce\u9669"]',
+                '["rug"]',
+                1725256800,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO rule_alerts VALUES (1, ?, ?, ?, ?, 1, ?, ?)",
+            (
+                "event-c",
+                "recommended.risk.contract-liquidity",
+                "critical",
+                "\u98ce\u9669\uff5c\u5408\u7ea6\u4e0e\u6d41\u52a8\u6027\u5371\u9669",
+                1725256800,
+                1725256810,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO analysis_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)",
+            (
+                "job-analysis-1",
+                "two_hour",
+                1725249600,
+                1725256800,
+                "succeeded",
+                '["event-c"]',
+                1,
+                5,
+                "1:2:3:4",
+                1725256800,
+                1725256810,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO analysis_results VALUES (1, ?, ?, ?, ?, 10, 20, ?, ?)",
+            (
+                "job-analysis-1",
+                json.dumps(
+                    {
+                        "summary": "Safe LAN summary",
+                        "summarySourceMessageIDs": ["event-c"],
+                        "topics": [{
+                            "topicID": "topic-1",
+                            "title": "Risk topic",
+                            "summary": "Risk increased",
+                            "sourceMessageIDs": ["event-c"],
+                        }],
+                        "findings": [{
+                            "findingID": "finding-1",
+                            "category": "risk",
+                            "text": "Review liquidity",
+                            "epistemicStatus": "fact",
+                            "sourceMessageIDs": ["event-c"],
+                        }],
+                        "cryptoAddresses": [{
+                            "address": "0xSafe",
+                            "normalizedAddress": "0xsafe",
+                            "contextSummary": "Mentioned in risk report",
+                            "epistemicStatus": "fact",
+                            "sourceMessageIDs": ["event-c"],
+                        }],
+                        "credentialRevision": "NEVER_EXPOSE_REVISION",
+                        "credential": "dummy-plan-key",
+                    }
+                ),
+                "MiniMax-M2.7",
+                "provider-request-1",
+                1725256800,
+                1725256810,
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+    def test_configured_lan_analysis_populates_read_only_endpoints(self):
+        analysis_path = os.path.join(
+            self.temporary_directory.name, "analysis.sqlite3"
+        )
+        self.create_analysis_fixture(analysis_path)
+        options = ServerOptions(
+            host="127.0.0.1",
+            port=0,
+            token="test-token",
+            static_root=self.static_root,
+            message_database=self.message_database,
+            group_config_path=self.group_config_path,
+            workspace_database=os.path.join(
+                self.temporary_directory.name, "missing-workspace.sqlite3"
+            ),
+            configuration_path=os.path.join(
+                self.temporary_directory.name, "must-not-open-credentials.json"
+            ),
+            analysis_database=analysis_path,
+        )
+        analysis_server = create_server(options)
+        analysis_thread = threading.Thread(target=analysis_server.serve_forever)
+        analysis_thread.start()
+        self.addCleanup(analysis_thread.join)
+        self.addCleanup(analysis_server.server_close)
+        self.addCleanup(analysis_server.shutdown)
+
+        def payload(path):
+            status, _, body = self.request_from_server(
+                analysis_server,
+                "GET",
+                path,
+                {"Authorization": "Bearer test-token"},
+            )
+            self.assertEqual(status, 200)
+            return json.loads(body)
+
+        message = payload("/api/messages?limit=1")["items"][0]
+        self.assertEqual(message["eventId"], "event-c")
+        self.assertEqual(message.get("tags"), ["高风险"])
+        self.assertEqual(message.get("severity"), "critical")
+        self.assertEqual(message.get("priority"), 50)
+        self.assertEqual(message.get("matchedTerms"), ["rug"])
+        self.assertEqual(
+            message.get("matchedRules"),
+            [{
+                "ruleId": "recommended.risk.contract-liquidity",
+                "name": "风险｜合约与流动性危险",
+                "priority": 50,
+            }],
+        )
+        rule = payload("/api/rules")["items"][0]
+        self.assertEqual(rule["priority"], 50)
+        self.assertEqual(rule.get("id"), rule["ruleId"])
+        self.assertIn("updatedAt", rule)
+        self.assertIsNone(rule["updatedAt"])
+        alert = payload("/api/alerts")["items"][0]
+        self.assertEqual(alert["sourceMessages"][0]["eventId"], "event-c")
+        self.assertEqual(alert["sourceMessages"][0]["tags"], ["高风险"])
+        self.assertEqual(payload("/api/priority")["items"][0]["priority"], 50)
+        analysis = payload("/api/analyses")["items"][0]
+        self.assertEqual(analysis["cadence"], "two_hour")
+        self.assertEqual(analysis.get("mode"), "digest")
+        self.assertEqual(analysis["summarySourceMessageIDs"], ["event-c"])
+        self.assertEqual(analysis.get("sourceReferences"), ["event-c"])
+        self.assertEqual(analysis.get("uncertainties"), [])
+        self.assertEqual(analysis["topics"][0]["sourceMessageIDs"], ["event-c"])
+        self.assertEqual(analysis["topics"][0].get("topicID"), "topic-1")
+        self.assertEqual(analysis["topics"][0].get("topicId"), "topic-1")
+        self.assertEqual(
+            analysis["topics"][0].get("sourceReferences"), ["event-c"]
+        )
+        self.assertEqual(analysis["findings"][0]["category"], "risk")
+        self.assertEqual(analysis["findings"][0].get("findingID"), "finding-1")
+        self.assertEqual(analysis["findings"][0].get("findingId"), "finding-1")
+        self.assertEqual(
+            analysis["findings"][0].get("sourceReferences"), ["event-c"]
+        )
+        self.assertEqual(
+            analysis["cryptoAddresses"][0]["normalizedAddress"], "0xsafe"
+        )
+        self.assertEqual(analysis["cryptoAddresses"][0].get("address"), "0xSafe")
+        self.assertEqual(analysis["sourceMessages"][0]["tags"], ["高风险"])
+        diagnostics = payload("/api/diagnostics")
+        self.assertEqual(
+            diagnostics.get("ruleEvaluation"),
+            {"messageCount": 1, "cursorTime": "2024-09-02T06:00:00Z", "cursorEventId": "event-c"},
+        )
+        self.assertEqual(
+            diagnostics.get("jobCounts"),
+            {
+                "queued": 0,
+                "running": 0,
+                "retryWait": 0,
+                "credentialRequired": 0,
+                "failed": 0,
+                "succeeded": 1,
+                "skippedEmpty": 0,
+            },
+        )
+
+        serialized = json.dumps(
+            {
+                path: payload(path)
+                for path in (
+                    "/api/messages",
+                    "/api/analyses",
+                    "/api/settings/status",
+                    "/api/diagnostics",
+                )
+            }
+        )
+        self.assertNotIn("dummy-plan-key", serialized)
+        self.assertNotIn("credentialRevision", serialized)
+
+    def test_unavailable_analysis_never_hides_or_fabricates_messages(self):
+        cases = []
+        missing = os.path.join(self.temporary_directory.name, "missing-analysis.sqlite3")
+        cases.append(("missing", missing, "source_unavailable", None))
+
+        corrupt = os.path.join(self.temporary_directory.name, "corrupt-analysis.sqlite3")
+        with open(corrupt, "wb") as stream:
+            stream.write(b"not a sqlite database")
+        cases.append(("corrupt", corrupt, "source_corrupt", None))
+
+        incompatible = os.path.join(
+            self.temporary_directory.name, "incompatible-analysis.sqlite3"
+        )
+        connection = sqlite3.connect(incompatible)
+        connection.execute("CREATE TABLE unrelated(value INTEGER)")
+        connection.close()
+        cases.append(("schema", incompatible, "schema_incompatible", None))
+
+        denied_directory = os.path.join(self.temporary_directory.name, "analysis-denied")
+        os.mkdir(denied_directory, 0o700)
+        denied = os.path.join(denied_directory, "analysis.sqlite3")
+        connection = sqlite3.connect(denied)
+        connection.execute("CREATE TABLE unrelated(value INTEGER)")
+        connection.close()
+        os.chmod(denied_directory, 0o000)
+        self.addCleanup(os.chmod, denied_directory, 0o700)
+        cases.append(("permission", denied, "source_permission_denied", None))
+
+        locked = os.path.join(self.temporary_directory.name, "locked-analysis.sqlite3")
+        self.create_analysis_fixture(locked)
+        lock = sqlite3.connect(locked, timeout=0)
+        lock.execute("PRAGMA locking_mode=EXCLUSIVE")
+        lock.execute("BEGIN EXCLUSIVE")
+        self.addCleanup(lock.close)
+        cases.append(("locked", locked, "source_locked", lock))
+
+        for label, analysis_path, expected_reason, held_lock in cases:
+            with self.subTest(label=label):
+                options = ServerOptions(
+                    host="127.0.0.1",
+                    port=0,
+                    token="test-token",
+                    static_root=self.static_root,
+                    message_database=self.message_database,
+                    group_config_path=self.group_config_path,
+                    workspace_database=os.path.join(
+                        self.temporary_directory.name, "missing-workspace.sqlite3"
+                    ),
+                    configuration_path=os.path.join(
+                        self.temporary_directory.name, "must-not-open.json"
+                    ),
+                    analysis_database=analysis_path,
+                )
+                temporary_server = create_server(options)
+                temporary_thread = threading.Thread(
+                    target=temporary_server.serve_forever
+                )
+                temporary_thread.start()
+                try:
+                    status, _, body = self.request_from_server(
+                        temporary_server,
+                        "GET",
+                        "/api/messages?limit=1",
+                        {"Authorization": "Bearer test-token"},
+                    )
+                    self.assertEqual(status, 200)
+                    message = json.loads(body)["items"][0]
+                    for field in (
+                        "tags", "matchedRules", "priority", "severity",
+                        "matchedTerms",
+                    ):
+                        self.assertNotIn(field, message)
+                    status, _, body = self.request_from_server(
+                        temporary_server,
+                        "GET",
+                        "/api/alerts",
+                        {"Authorization": "Bearer test-token"},
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(json.loads(body)["reason"], expected_reason)
+                finally:
+                    temporary_server.shutdown()
+                    temporary_server.server_close()
+                    temporary_thread.join()
+        lock.rollback()
+
+    def test_annotation_merge_is_pure_and_only_adds_persisted_fields(self):
+        source = [{"eventId": "event-a", "content": "safe"}]
+        annotations = {
+            "event-a": {
+                "tags": ["高风险"],
+                "matchedRules": [{"ruleId": "rule-1", "priority": 50}],
+                "priority": 50,
+                "severity": "critical",
+                "matchedTerms": ["rug"],
+            }
+        }
+
+        merged = merge_message_annotations(source, annotations)
+
+        self.assertEqual(merged[0]["tags"], ["高风险"])
+        self.assertNotIn("tags", source[0])
+        merged[0]["tags"].append("changed")
+        merged[0]["matchedRules"][0]["priority"] = 0
+        self.assertEqual(annotations["event-a"]["tags"], ["高风险"])
+        self.assertEqual(
+            annotations["event-a"]["matchedRules"][0]["priority"], 50
+        )
+        self.assertEqual(
+            merge_message_annotations(source, {})[0], source[0]
+        )
+
+    def test_analysis_repository_connection_is_query_only(self):
+        analysis_path = os.path.join(
+            self.temporary_directory.name, "query-only-analysis.sqlite3"
+        )
+        self.create_analysis_fixture(analysis_path)
+        connection = AnalysisRepository(analysis_path)._open()
+        self.addCleanup(connection.close)
+
+        self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
+        with self.assertRaises(sqlite3.OperationalError):
+            connection.execute("DELETE FROM rule_alerts")
+
+    def test_settings_validate_only_needed_state_and_never_open_credentials(self):
+        analysis_path = os.path.join(
+            self.temporary_directory.name, "settings-only-analysis.sqlite3"
+        )
+        connection = sqlite3.connect(analysis_path)
+        connection.execute(
+            """
+            CREATE TABLE analysis_worker_state(
+              singleton_id INTEGER PRIMARY KEY,
+              rule_catalog_version INTEGER,
+              credential_status TEXT,
+              last_provider_success_at REAL,
+              last_error_code TEXT
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO analysis_worker_state VALUES (1, 1, 'configured', ?, NULL)",
+            (1725256810,),
+        )
+        connection.commit()
+        connection.close()
+        credentials_path = os.path.join(
+            self.temporary_directory.name, "credentials-must-not-open.json"
+        )
+        with open(credentials_path, "w", encoding="utf-8") as stream:
+            stream.write('{"apiKey":"dummy-plan-key"}')
+        options = ServerOptions(
+            host="127.0.0.1",
+            port=0,
+            token="test-token",
+            static_root=self.static_root,
+            message_database=self.message_database,
+            group_config_path=self.group_config_path,
+            workspace_database=os.path.join(
+                self.temporary_directory.name, "missing-native.sqlite3"
+            ),
+            configuration_path=credentials_path,
+            analysis_database=analysis_path,
+        )
+        temporary_server = create_server(options)
+        temporary_thread = threading.Thread(target=temporary_server.serve_forever)
+        temporary_thread.start()
+        try:
+            with mock.patch("builtins.open", side_effect=AssertionError("opened credentials")):
+                status, _, body = self.request_from_server(
+                    temporary_server,
+                    "GET",
+                    "/api/settings/status",
+                    {"Authorization": "Bearer test-token"},
+                )
+                self.assertEqual(status, 200)
+                settings = json.loads(body)
+                self.assertEqual(settings["available"], True)
+                self.assertEqual(settings["aiConfigured"], True)
+                self.assertEqual(settings["providerNames"], ["MiniMax-M2.7"])
+                status, _, body = self.request_from_server(
+                    temporary_server,
+                    "GET",
+                    "/api/diagnostics",
+                    {"Authorization": "Bearer test-token"},
+                )
+                self.assertEqual(status, 200)
+                diagnostics = json.loads(body)
+                self.assertEqual(
+                    diagnostics["sources"]["analysis"]["reason"],
+                    "schema_incompatible",
+                )
+            self.assertNotIn("dummy-plan-key", json.dumps((settings, diagnostics)))
+        finally:
+            temporary_server.shutdown()
+            temporary_server.server_close()
+            temporary_thread.join()
+
+    def test_invalid_analysis_rows_are_bounded_and_isolated_by_endpoint(self):
+        analysis_path = os.path.join(
+            self.temporary_directory.name, "invalid-analysis.sqlite3"
+        )
+        self.create_analysis_fixture(analysis_path)
+        connection = sqlite3.connect(analysis_path)
+        connection.execute(
+            "INSERT INTO message_rule_matches VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "event-b", "recommended.signal.exit", 40, "warning",
+                "{not-json", '["\u6e05\u4ed3"]', 1725256801,
+            ),
+        )
+        connection.execute(
+            "UPDATE analysis_results SET result_json = ?",
+            (json.dumps({"summary": "x" * (64 * 1024)}),),
+        )
+        connection.execute(
+            "INSERT INTO rule_alerts VALUES (2, ?, ?, ?, ?, 1, ?, ?)",
+            (
+                "event-b",
+                "recommended.signal.exit",
+                "warning",
+                "unsafe\u202etitle",
+                1725256801,
+                1725256811,
+            ),
+        )
+        connection.commit()
+        connection.close()
+        options = ServerOptions(
+            host="127.0.0.1",
+            port=0,
+            token="test-token",
+            static_root=self.static_root,
+            message_database=self.message_database,
+            group_config_path=self.group_config_path,
+            workspace_database="",
+            configuration_path="",
+            analysis_database=analysis_path,
+        )
+        temporary_server = create_server(options)
+        temporary_thread = threading.Thread(target=temporary_server.serve_forever)
+        temporary_thread.start()
+        try:
+            def payload(path):
+                status, _, body = self.request_from_server(
+                    temporary_server,
+                    "GET",
+                    path,
+                    {"Authorization": "Bearer test-token"},
+                )
+                self.assertEqual(status, 200)
+                return json.loads(body)
+
+            priority = payload("/api/priority")
+            self.assertEqual(
+                [item["eventId"] for item in priority["items"]], ["event-c"]
+            )
+            self.assertEqual(priority.get("invalidRows"), 1)
+            analyses = payload("/api/analyses")
+            self.assertEqual(analyses["items"], [])
+            self.assertEqual(analyses.get("invalidRows"), 1)
+            alerts = payload("/api/alerts")
+            self.assertEqual(alerts["available"], True)
+            self.assertEqual(len(alerts["items"]), 1)
+            self.assertEqual(alerts.get("invalidRows"), 1)
+        finally:
+            temporary_server.shutdown()
+            temporary_server.server_close()
+            temporary_thread.join()
+
+    def test_analysis_large_frozen_windows_remain_visible_with_bounded_sources(self):
+        analysis_path = os.path.join(self.temporary_directory.name, "large-analysis.sqlite3")
+        self.create_analysis_fixture(analysis_path)
+        frozen_ids = ["event-window-{:05d}".format(index) for index in range(8366)]
+        frozen_ids.append("event-c")
+        frozen_json = json.dumps(frozen_ids)
+        self.assertGreater(len(frozen_json.encode("utf-8")), 64 * 1024)
+        connection = sqlite3.connect(analysis_path)
+        connection.execute(
+            "UPDATE analysis_jobs SET source_event_ids_json = ?", (frozen_json,)
+        )
+        for job_id, state, source_json in (
+            ("job-queued-686", "queued", json.dumps(frozen_ids[:686])),
+            ("job-retry-8367", "retry_waiting", frozen_json),
+        ):
+            connection.execute(
+                "INSERT INTO analysis_jobs SELECT ?, cadence, window_start, "
+                "window_end, ?, ?, attempt, maximum_attempts, next_attempt_at, "
+                "error_code, credential_file_revision, created_at, updated_at "
+                "FROM analysis_jobs WHERE job_id = 'job-analysis-1'",
+                (job_id, state, source_json),
+            )
+        connection.commit()
+        connection.close()
+        connection = sqlite3.connect(self.message_database)
+        connection.executemany(
+            "INSERT INTO messages(event_id, conversation_id, group_name, "
+            "content, message_type, observed_at) VALUES (?, 1, 'fixture', "
+            "'Offline source message', 'text', 1725256800)",
+            [(event_id,) for event_id in frozen_ids[:-1]],
+        )
+        connection.commit()
+        connection.close()
+        analysis_server = create_server(ServerOptions(
+            host="127.0.0.1", port=0, token="test-token",
+            static_root=self.static_root, message_database=self.message_database,
+            group_config_path=self.group_config_path, workspace_database="",
+            configuration_path="", analysis_database=analysis_path,
+        ))
+        analysis_thread = threading.Thread(target=analysis_server.serve_forever)
+        analysis_thread.start()
+        self.addCleanup(analysis_thread.join)
+        self.addCleanup(analysis_server.server_close)
+        self.addCleanup(analysis_server.shutdown)
+
+        status, _, body = self.request_from_server(
+            analysis_server, "GET", "/api/analyses",
+            {"Authorization": "Bearer test-token"},
+        )
+
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload.get("invalidRows", 0), 0)
+        jobs = {item["jobId"]: item for item in payload["items"]}
+        self.assertEqual(set(jobs), {
+            "job-analysis-1", "job-queued-686", "job-retry-8367",
+        })
+        succeeded = jobs["job-analysis-1"]
+        self.assertEqual(succeeded["sourceReferences"], ["event-c"])
+        self.assertEqual(len(succeeded["sourceMessages"]), 1000)
+        self.assertEqual(succeeded["sourceMessages"][0]["eventId"], "event-c")
+        self.assertEqual(succeeded["sourceMessages"][0]["tags"], ["高风险"])
+        self.assertEqual(jobs["job-queued-686"]["state"], "queued")
+        self.assertEqual(len(jobs["job-queued-686"]["sourceMessages"]), 686)
+        self.assertEqual(jobs["job-retry-8367"]["state"], "retry_wait")
+        self.assertEqual(len(jobs["job-retry-8367"]["sourceMessages"]), 1000)
+        connection = sqlite3.connect(analysis_path)
+        stored = connection.execute(
+            "SELECT source_event_ids_json FROM analysis_jobs "
+            "WHERE job_id = 'job-analysis-1'"
+        ).fetchone()[0]
+        connection.close()
+        self.assertEqual(stored, frozen_json)
+
+    def test_analysis_diagnostics_combine_persisted_and_legacy_retry_states(self):
+        analysis_path = os.path.join(self.temporary_directory.name, "retry-analysis.sqlite3")
+        self.create_analysis_fixture(analysis_path)
+        connection = sqlite3.connect(analysis_path)
+        connection.execute("UPDATE analysis_jobs SET state = 'retry_waiting'")
+        for job_id, state in (
+            ("job-retry-current", "retry_waiting"),
+            ("job-retry-legacy", "retry_wait"),
+        ):
+            connection.execute(
+                "INSERT INTO analysis_jobs SELECT ?, cadence, window_start, "
+                "window_end, ?, source_event_ids_json, attempt, maximum_attempts, "
+                "next_attempt_at, error_code, credential_file_revision, created_at, "
+                "updated_at FROM analysis_jobs WHERE job_id = 'job-analysis-1'",
+                (job_id, state),
+            )
+        connection.commit()
+        connection.close()
+
+        payload = AnalysisRepository(analysis_path).diagnostics()
+
+        self.assertTrue(payload["sources"]["analysisJobs"]["available"])
+        self.assertEqual(payload["jobCounts"]["retryWait"], 3)
+        self.assertEqual(payload["jobCounts"]["succeeded"], 0)
+
+    def test_analysis_large_windows_still_validate_all_frozen_ids_and_references(self):
+        analysis_path = os.path.join(self.temporary_directory.name, "invalid-large-analysis.sqlite3")
+        self.create_analysis_fixture(analysis_path)
+        frozen_ids = ["event-window-{:05d}".format(index) for index in range(8366)]
+        frozen_ids.append("event-c")
+        connection = sqlite3.connect(analysis_path)
+        original = json.loads(connection.execute(
+            "SELECT result_json FROM analysis_results"
+        ).fetchone()[0])
+        repository = AnalysisRepository(analysis_path)
+        messages = MessageRepository(self.message_database, self.group_config_path)
+        for section in ("summary", "topics", "findings", "cryptoAddresses", "frozen_ids"):
+            with self.subTest(section=section):
+                result = json.loads(json.dumps(original))
+                source_ids = list(frozen_ids)
+                if section == "summary":
+                    result["summarySourceMessageIDs"] = ["event-a"]
+                elif section == "frozen_ids":
+                    source_ids[-1] = "invalid\u202esource"
+                else:
+                    result[section][0]["sourceMessageIDs"] = ["event-a"]
+                connection.execute(
+                    "UPDATE analysis_jobs SET source_event_ids_json = ?",
+                    (json.dumps(source_ids),),
+                )
+                connection.execute(
+                    "UPDATE analysis_results SET result_json = ?", (json.dumps(result),)
+                )
+                connection.commit()
+
+                payload = repository.analyses(messages)
+
+                self.assertEqual(payload["items"], [])
+                self.assertEqual(payload.get("invalidRows"), 1)
+        connection.close()
+
+    def test_priority_uses_message_time_after_rule_priority(self):
+        analysis_path = os.path.join(
+            self.temporary_directory.name, "priority-analysis.sqlite3"
+        )
+        self.create_analysis_fixture(analysis_path)
+        connection = sqlite3.connect(analysis_path)
+        connection.execute(
+            "UPDATE message_rule_matches SET created_at = 9999999999 "
+            "WHERE event_id = 'event-c'"
+        )
+        connection.execute(
+            "INSERT INTO message_rule_matches VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "event-a", "recommended.risk.contract-liquidity", 50,
+                "critical", '["\u9ad8\u98ce\u9669"]', '["rug"]', 1,
+            ),
+        )
+        connection.commit()
+        connection.close()
+        connection = sqlite3.connect(self.message_database)
+        connection.execute(
+            "UPDATE messages SET observed_at = 1725256900 WHERE event_id = 'event-a'"
+        )
+        connection.commit()
+        connection.close()
+        repository = AnalysisRepository(analysis_path)
+
+        payload = repository.priority(
+            MessageRepository(self.message_database, self.group_config_path)
+        )
+
+        self.assertEqual(
+            [item["eventId"] for item in payload["items"]],
+            ["event-a", "event-c"],
+        )
 
     def test_api_requires_bearer_token(self):
         status, _, _ = self.request("GET", "/api/bootstrap")
@@ -987,7 +1748,7 @@ class LanServerTests(unittest.TestCase):
     def test_static_root_serves_index_with_security_headers(self):
         status, headers, body = self.request("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn("wxFomo LAN", body)
+        self.assertIn("wxFomo · 群消息总结", body)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(headers["Referrer-Policy"], "no-referrer")
         self.assertEqual(headers["Cache-Control"], "no-store")
@@ -1239,1375 +2000,6 @@ class LanServerTests(unittest.TestCase):
         self.assertEqual(body, "")
 
 
-class WorkspaceEndpointTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary_directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary_directory.cleanup)
-        self.static_root = os.path.join(self.temporary_directory.name, "static")
-        os.mkdir(self.static_root)
-        with open(os.path.join(self.static_root, "index.html"), "w", encoding="utf-8") as stream:
-            stream.write("<!doctype html><title>wxFomo LAN</title>")
-        self.message_database = os.path.join(self.temporary_directory.name, "messages.sqlite3")
-        self.workspace_path = os.path.join(self.temporary_directory.name, "workspace.sqlite3")
-        self.configuration_path = os.path.join(
-            self.temporary_directory.name, "configuration-center.json"
-        )
-        self.create_message_fixture()
-        self.create_workspace_fixture()
-        with open(self.configuration_path, "w", encoding="utf-8") as stream:
-            json.dump(
-                {
-                    "version": 1,
-                    "aiProviderAPIKeys": {"provider-reference": "NEVER_EXPOSE_THIS"},
-                    "speech": {"volcengineSeedAPIKey": None},
-                },
-                stream,
-            )
-        self.start_server()
-
-    def create_message_fixture(self):
-        connection = sqlite3.connect(self.message_database)
-        connection.executescript(
-            """
-            CREATE TABLE conversations(
-              id INTEGER PRIMARY KEY,
-              group_name TEXT NOT NULL,
-              message_count INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE messages(
-              id INTEGER PRIMARY KEY,
-              event_id TEXT NOT NULL UNIQUE,
-              conversation_id INTEGER NOT NULL,
-              group_name TEXT NOT NULL,
-              sender_display_name TEXT,
-              content TEXT NOT NULL,
-              message_type TEXT NOT NULL,
-              observed_at REAL NOT NULL,
-              source_sequence INTEGER
-            );
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO messages(
-              event_id, conversation_id, group_name, sender_display_name, content,
-              message_type, observed_at, source_sequence
-            ) VALUES (?, 1, ?, ?, ?, 'text', ?, ?)
-            """,
-            (
-                "event-a", "safe-group", "safe-sender",
-                "真实来源 https://dexscreener.com/base/0xsafe", 1725256800, 1,
-            ),
-        )
-        connection.commit()
-        connection.close()
-
-    def create_workspace_fixture(self):
-        connection = sqlite3.connect(self.workspace_path)
-        connection.executescript(
-            """
-            CREATE TABLE workspace_schema_migrations(
-              version INTEGER PRIMARY KEY,
-              applied_at REAL NOT NULL
-            );
-            CREATE TABLE workspace_alerts(
-              alert_id TEXT PRIMARY KEY,
-              severity TEXT NOT NULL,
-              title TEXT NOT NULL,
-              body TEXT,
-              source_event_ids_json BLOB NOT NULL,
-              occurrence_count INTEGER NOT NULL,
-              rule_id TEXT,
-              acknowledged_at REAL,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            CREATE TABLE crypto_address_incidents(
-              incident_id TEXT PRIMARY KEY,
-              family TEXT NOT NULL,
-              network TEXT NOT NULL,
-              normalized_address TEXT NOT NULL,
-              original_address TEXT NOT NULL,
-              first_seen_at REAL NOT NULL,
-              latest_seen_at REAL NOT NULL,
-              mention_count INTEGER NOT NULL,
-              group_names_json BLOB NOT NULL,
-              source_event_ids_json BLOB NOT NULL,
-              alert_id TEXT NOT NULL UNIQUE,
-              status TEXT NOT NULL,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            CREATE TABLE analysis_jobs(
-              job_id TEXT PRIMARY KEY,
-              frozen_range_id TEXT NOT NULL,
-              provider_id TEXT NOT NULL,
-              mode TEXT NOT NULL,
-              state TEXT NOT NULL,
-              attempt INTEGER NOT NULL,
-              maximum_attempts INTEGER NOT NULL,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            CREATE TABLE analysis_results(
-              analysis_id TEXT PRIMARY KEY,
-              job_id TEXT NOT NULL,
-              result_json BLOB NOT NULL,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            CREATE TABLE message_rules(
-              rule_id TEXT PRIMARY KEY,
-              rule_json BLOB NOT NULL,
-              priority INTEGER NOT NULL,
-              is_enabled INTEGER NOT NULL,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            CREATE TABLE ca_watch_pool_items(
-              family TEXT NOT NULL,
-              network TEXT NOT NULL,
-              normalized_address TEXT NOT NULL,
-              item_json BLOB NOT NULL,
-              state TEXT NOT NULL,
-              is_pinned INTEGER NOT NULL,
-              latest_seen_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            CREATE TABLE trade_automation_rules(
-              rule_id TEXT PRIMARY KEY,
-              rule_json BLOB NOT NULL,
-              is_enabled INTEGER NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            CREATE TABLE trade_automation_configuration(
-              singleton_id INTEGER PRIMARY KEY,
-              configuration_json BLOB NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            CREATE TABLE trade_intents(
-              intent_id TEXT PRIMARY KEY,
-              rule_id TEXT NOT NULL,
-              state TEXT NOT NULL,
-              chain TEXT,
-              family TEXT NOT NULL,
-              token_address TEXT NOT NULL,
-              estimated_spend_usd REAL,
-              order_id TEXT,
-              intent_json BLOB NOT NULL,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            CREATE TABLE ai_provider_configurations(
-              configuration_id TEXT PRIMARY KEY,
-              configuration_json BLOB NOT NULL,
-              is_default INTEGER NOT NULL,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            """
-        )
-        connection.execute(
-            "INSERT INTO workspace_schema_migrations(version, applied_at) VALUES (1, ?)",
-            (1725256800,),
-        )
-        connection.execute(
-            """
-            INSERT INTO workspace_alerts(
-              alert_id, severity, title, body, source_event_ids_json, occurrence_count,
-              rule_id, acknowledged_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "alert-1", "warning", "Price moved", "Check the token", '["event-a"]',
-                2, "rule-1", None, 1725256800, 1725256810,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO crypto_address_incidents(
-              incident_id, family, network, normalized_address, original_address,
-              first_seen_at, latest_seen_at, mention_count, group_names_json,
-              source_event_ids_json, alert_id, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "incident-1", "evm", "base", "0xsafe", "0xSafe", 1725256700,
-                1725256810, 3, '["safe-group"]', '["event-a"]', "alert-1",
-                "active", 1725256800, 1725256810,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO analysis_jobs(
-              job_id, frozen_range_id, provider_id, mode, state, attempt,
-              maximum_attempts, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            ("job-1", "range-1", "provider-1", "digest", "succeeded", 1, 3, 1725256800, 1725256810),
-        )
-        connection.executemany(
-            """
-            INSERT INTO analysis_jobs(
-              job_id, frozen_range_id, provider_id, mode, state, attempt,
-              maximum_attempts, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                ("job-pending", "range-2", "provider-1", "action_items", "pending", 0, 3, 1725256820, 1725256820),
-                ("job-running", "range-3", "provider-1", "digest", "running", 1, 3, 1725256830, 1725256830),
-                ("job-retry", "range-4", "provider-1", "digest", "retry_wait", 1, 3, 1725256840, 1725256840),
-                ("job-failed", "range-5", "provider-1", "digest", "failed", 3, 3, 1725256850, 1725256850),
-                ("job-cancelled", "range-6", "provider-1", "digest", "cancelled", 0, 3, 1725256860, 1725256860),
-            ],
-        )
-        connection.execute(
-            """
-            INSERT INTO analysis_results(
-              analysis_id, job_id, result_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                "analysis-1",
-                "job-1",
-                json.dumps(
-                    {
-                        "analysisID": "analysis-1",
-                        "requestID": "request-1",
-                        "schemaVersion": 1,
-                        "summary": "Safe summary",
-                        "summarySourceMessageIDs": ["event-a"],
-                        "topics": [
-                            {
-                                "topicID": "topic-1",
-                                "title": "Token momentum",
-                                "summary": "Volume increased",
-                                "sourceMessageIDs": ["event-a"],
-                                "requestHeaders": {
-                                    "Authorization": "Bearer NEVER_EXPOSE_THIS"
-                                },
-                            },
-                        ],
-                        "findings": [
-                            {
-                                "findingID": "finding-1",
-                                "category": "risk",
-                                "text": "Liquidity is limited",
-                                "epistemicStatus": "inference",
-                                "sourceMessageIDs": ["event-a"],
-                                "signatureValue": "NEVER_EXPOSE_ANALYSIS_SIGNATURE",
-                            },
-                        ],
-                        "cryptoAddresses": [],
-                        "usage": {"inputTokens": 50, "outputTokens": 20},
-                        "provenance": {
-                            "providerConfigurationID": "provider-1",
-                            "providerKind": "openai_compatible_chat_completions",
-                            "model": "NEVER_EXPOSE_MODEL_SECRET",
-                            "remoteRequestID": None,
-                            "remoteResponseID": None,
-                            "sourceMessageIDs": ["event-a"],
-                            "requestSchemaVersion": 1,
-                            "resultSchemaVersion": 1,
-                            "generatedAt": 1725256810,
-                        },
-                        "validationWarnings": ["uncited_summary"],
-                    }
-                ),
-                1725256810,
-                1725256810,
-            ),
-        )
-        connection.executemany(
-            """
-            INSERT INTO message_rules(
-              rule_id, rule_json, priority, is_enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    "rule-1",
-                    json.dumps(
-                        {
-                            "schemaVersion": 1,
-                            "revision": 1,
-                            "id": "rule-display-1",
-                            "name": "Momentum",
-                            "priority": 8,
-                            "isEnabled": True,
-                            "condition": {
-                                "groups": ["safe-group", "项目/交易群"],
-                                "senders": ["safe-sender"],
-                                "includeKeywords": ["up"],
-                                "includeKeywordMode": "all",
-                                "excludeKeywords": ["spam"],
-                                "regularExpressions": ["OPAQUE_ONE", "OPAQUE_TWO"],
-                                "regularExpressionMode": "any",
-                                "messageTypes": ["text"],
-                                "timeWindows": [
-                                    {
-                                        "startMinuteOfDay": 60,
-                                        "endMinuteOfDay": 120,
-                                        "weekdays": [2],
-                                        "timeZoneIdentifier": "Asia/Shanghai",
-                                        "credentialPath": "/Users/secret/key.pem",
-                                    }
-                                ],
-                                "caseSensitive": False,
-                                "requestHeaders": {
-                                    "Authorization": "Bearer NEVER_EXPOSE_THIS"
-                                },
-                            },
-                            "actions": [
-                                {
-                                    "type": "local_alert",
-                                    "severity": "warning",
-                                    "title": "Safe alert",
-                                    "webhookUrl": "https://secret.example.invalid/hook",
-                                    "requestHeaders": {
-                                        "Authorization": "Bearer NEVER_EXPOSE_THIS"
-                                    },
-                                },
-                                {
-                                    "type": "enqueue_summary",
-                                    "configuration_id": "provider-safe",
-                                    "prompt": "NEVER_EXPOSE_SUMMARY_PROMPT",
-                                },
-                                {
-                                    "type": "invoke_script",
-                                    "script_id": "safe-script",
-                                    "arguments": [
-                                        "--safe",
-                                        "/Users/secret/private-key.pem",
-                                        "Authorization: NEVER_EXPOSE_THIS",
-                                        "X-aUtH-tOkEn: abc123",
-                                        "COOKIE: SESSION=ABC123",
-                                        "../CONFIG/PROD.TOML",
-                                        "SSH://USER@HOST/REPO",
-                                    ],
-                                    "signatureValue": "NEVER_EXPOSE_RULE_SIGNATURE",
-                                },
-                            ],
-                        }
-                    ),
-                    8,
-                    1,
-                    1725256800,
-                    1725256810,
-                ),
-                ("rule-invalid", "{NEVER_EXPOSE_INVALID_RULE", 1, 1, 1725256800, 1725256810),
-            ],
-        )
-        connection.execute(
-            """
-            INSERT INTO ca_watch_pool_items(
-              family, network, normalized_address, item_json, state, is_pinned,
-              latest_seen_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "evm",
-                "base",
-                "0xsafe",
-                json.dumps(
-                    {
-                        "family": "evm",
-                        "network": "base",
-                        "normalizedAddress": "0xsafe",
-                        "chain": "base",
-                        "state": "watching",
-                        "entrySnapshot": {
-                            "chain": "base",
-                            "address": "0xsafe",
-                            "symbol": "SAFE",
-                            "name": "Safe Coin",
-                            "priceUSD": 1.0,
-                            "marketCapUSD": 400000,
-                            "liquidityUSD": 60000,
-                            "logoURL": "https://secret.example.invalid/logo.png",
-                            "capturedAt": 1725256800,
-                            "source": "gmgn",
-                        },
-                        "currentSnapshot": {
-                            "chain": "base",
-                            "address": "0xsafe",
-                            "symbol": "SAFE",
-                            "name": "Safe Coin",
-                            "priceUSD": 1.25,
-                            "marketCapUSD": 500000,
-                            "liquidityUSD": 75000,
-                            "logoURL": "https://secret.example.invalid/logo.png",
-                            "capturedAt": 1725256810,
-                            "source": "gmgn",
-                            "requestHeaders": {
-                                "Authorization": "Bearer NEVER_EXPOSE_THIS"
-                            },
-                        },
-                        "isPinned": True,
-                        "mentionCount": 3,
-                        "groupNames": ["safe-group"],
-                        "firstSeenAt": 1725256700,
-                        "latestSeenAt": 1725256810,
-                        "lastCheckedAt": 1725256810,
-                        "consecutiveFailures": 0,
-                        "belowThresholdCount": 0,
-                        "removalReason": None,
-                        "updatedAt": 1725256810,
-                    }
-                ),
-                "watching",
-                1,
-                1725256810,
-                1725256810,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO trade_automation_rules(rule_id, rule_json, is_enabled, updated_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                "automation-1",
-                json.dumps(
-                    {
-                        "id": "automation-display-1",
-                        "name": "Paper buy",
-                        "isEnabled": True,
-                        "allowedChains": ["base"],
-                        "groups": ["safe-group"],
-                        "senders": ["safe-sender"],
-                        "aggregationWindowSeconds": 600,
-                        "minimumMentions": 2,
-                        "minimumDistinctGroups": 2,
-                        "minimumMarketCapUSD": 500000,
-                        "maximumMarketCapUSD": 20000000,
-                        "minimumLiquidityUSD": 100000,
-                        "minimumHolderCount": 100,
-                        "maximumRugRatio": 0.1,
-                        "requireSecurityData": True,
-                        "inputAmountNative": 0.01,
-                        "maximumSlippagePercent": 12,
-                        "antiMEV": True,
-                        "maximumTradesPerDay": 2,
-                        "tokenCooldownSeconds": 86400,
-                        "protectionOrders": [
-                            {
-                                "id": "protection-1",
-                                "kind": "stop_loss",
-                                "triggerPercent": 50,
-                                "sellPercent": 100,
-                                "webhookUrl": "https://secret.example.invalid/risk",
-                                "signatureValue": "NEVER_EXPOSE_RISK_SIGNATURE",
-                            }
-                        ],
-                        "createdAt": 1725256800,
-                        "updatedAt": 1725256810,
-                    }
-                ),
-                1,
-                1725256810,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO trade_intents(
-              intent_id, rule_id, state, chain, family, token_address,
-              estimated_spend_usd, order_id, intent_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "intent-1",
-                "automation-1",
-                "simulated",
-                "base",
-                "evm",
-                "0xsafe",
-                25.0,
-                None,
-                json.dumps(
-                    {
-                        "id": "intent-1",
-                        "idempotencyKey": "intent-safe-key",
-                        "ruleID": "automation-1",
-                        "side": "buy",
-                        "state": "simulated",
-                        "chain": "base",
-                        "family": "evm",
-                        "tokenAddress": "0xsafe",
-                        "tokenSymbol": "SAFE",
-                        "tokenName": "Safe Coin",
-                        "tokenLogoURL": "https://secret.example.invalid/logo.png",
-                        "sourceEventIDs": ["event-a"],
-                        "sourceGroups": ["safe-group"],
-                        "mentionCount": 2,
-                        "distinctGroupCount": 2,
-                        "marketSnapshot": None,
-                        "securitySnapshot": {
-                            "openSource": "yes",
-                            "ownerRenounced": "yes",
-                            "isHoneypot": "no",
-                            "mintRenounced": True,
-                            "freezeRenounced": True,
-                            "rugRatio": 0.05,
-                            "top10HolderRate": 0.2,
-                            "devTeamHoldRate": 0.01,
-                            "suspectedInsiderHoldRate": 0.02,
-                            "washTrading": False,
-                            "buyTax": 0.01,
-                            "sellTax": 0.02,
-                            "requestHeaders": {
-                                "Authorization": "Bearer NEVER_EXPOSE_THIS"
-                            },
-                        },
-                        "inputToken": "ETH",
-                        "outputToken": "SAFE",
-                        "inputAmountNative": 0.01,
-                        "estimatedSpendUSD": 25.0,
-                        "quote": {
-                            "signatureValue": "NEVER_EXPOSE_QUOTE_SIGNATURE",
-                            "webhookUrl": "https://secret.example.invalid/quote",
-                        },
-                        "rejectionReasons": [],
-                        "failureReason": None,
-                        "createdAt": 1725256810,
-                        "updatedAt": 1725256810,
-                    }
-                ),
-                1725256810,
-                1725256810,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO ai_provider_configurations(
-              configuration_id, configuration_json, is_default, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                "provider-1",
-                json.dumps(
-                    {
-                        "displayName": "OpenAI Compatible",
-                        "baseURL": "https://user:password@example.invalid/v1",
-                        "model": "NEVER_EXPOSE_MODEL_SECRET",
-                        "headers": {"X-API-Key": "NEVER_EXPOSE_HEADER"},
-                    }
-                ),
-                1,
-                1725256800,
-                1725256810,
-            ),
-        )
-        connection.commit()
-        connection.close()
-
-    def start_server(self):
-        self.server = create_server(
-            ServerOptions(
-                host="127.0.0.1",
-                port=0,
-                token="test-token",
-                static_root=self.static_root,
-                message_database=self.message_database,
-                group_config_path=os.path.join(
-                    self.temporary_directory.name, "missing-wecom-groups.txt"
-                ),
-                workspace_database=self.workspace_path,
-                configuration_path=self.configuration_path,
-            )
-        )
-        self.thread = threading.Thread(target=self.server.serve_forever)
-        self.thread.start()
-        self.addCleanup(self.stop_server)
-
-    def stop_server(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join()
-
-    def request(self, path):
-        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
-        connection.request("GET", path, headers={"Authorization": "Bearer test-token"})
-        response = connection.getresponse()
-        body = response.read().decode("utf-8")
-        result = response.status, json.loads(body)
-        connection.close()
-        return result
-
-    def test_workspace_endpoints_return_only_display_safe_dtos(self):
-        payloads = {}
-        for endpoint in (
-            "alerts", "analyses", "meme", "market", "rules", "automations", "trades",
-            "settings/status", "diagnostics",
-        ):
-            with self.subTest(endpoint=endpoint):
-                status, payloads[endpoint] = self.request("/api/" + endpoint)
-                self.assertEqual(status, 200)
-
-        self.assertEqual(
-            payloads["alerts"]["items"][0],
-            {
-                "alertId": "alert-1",
-                "severity": "warning",
-                "title": "Price moved",
-                "body": "Check the token",
-                "sourceEventIds": ["event-a"],
-                "occurrenceCount": 2,
-                "ruleId": "rule-1",
-                "acknowledgedAt": None,
-                "createdAt": "2024-09-02T06:00:00Z",
-                "updatedAt": "2024-09-02T06:00:10Z",
-                "tokenContext": {
-                    "family": "evm",
-                    "network": "base",
-                    "address": "0xsafe",
-                    "mentionCount": 3,
-                    "groupNames": ["safe-group"],
-                },
-                "sourceMessages": [
-                    {
-                        "eventId": "event-a",
-                        "group": "safe-group",
-                        "sender": "safe-sender",
-                        "content": "真实来源 https://dexscreener.com/base/0xsafe",
-                        "messageType": "text",
-                        "observedAt": "2024-09-02T06:00:00Z",
-                        "sourceSequence": 1,
-                        "links": ["https://dexscreener.com/base/0xsafe"],
-                    }
-                ],
-            },
-        )
-        analyses_by_job = {
-            item["jobId"]: item for item in payloads["analyses"]["items"]
-        }
-        self.assertEqual(
-            set(analyses_by_job),
-            {
-                "job-1", "job-pending", "job-running", "job-retry",
-                "job-failed", "job-cancelled",
-            },
-        )
-        self.assertEqual(analyses_by_job["job-1"]["summary"], "Safe summary")
-        self.assertEqual(
-            analyses_by_job["job-1"]["sourceReferences"], ["event-a"]
-        )
-        self.assertEqual(
-            analyses_by_job["job-1"]["topics"],
-            [
-                {
-                    "topicId": "topic-1",
-                    "title": "Token momentum",
-                    "summary": "Volume increased",
-                    "sourceReferences": ["event-a"],
-                }
-            ],
-        )
-        self.assertEqual(analyses_by_job["job-pending"]["state"], "pending")
-        self.assertEqual(analyses_by_job["job-pending"]["analysisId"], None)
-        self.assertNotIn("summary", analyses_by_job["job-pending"])
-        self.assertEqual(payloads["meme"]["items"][0]["symbol"], "SAFE")
-        self.assertEqual(payloads["meme"]["items"][0]["priceUsd"], 1.25)
-        self.assertEqual(payloads["meme"]["items"][0]["marketCapUsd"], 500000)
-        self.assertEqual(payloads["meme"]["items"][0]["liquidityUsd"], 75000)
-        self.assertEqual(payloads["meme"]["items"][0]["isPinned"], True)
-        self.assertEqual(payloads["meme"]["items"][0]["mentionCount"], 3)
-        self.assertEqual(payloads["meme"]["items"][0]["groupNames"], ["safe-group"])
-        self.assertEqual(payloads["market"]["available"], False)
-        self.assertEqual(payloads["market"]["reason"], "schema_incompatible")
-        self.assertEqual(payloads["rules"]["items"][0]["name"], "Momentum")
-        self.assertEqual(
-            payloads["rules"]["items"][0]["condition"]["groups"],
-            ["safe-group", "项目/交易群"],
-        )
-        self.assertEqual(
-            payloads["rules"]["items"][0]["condition"],
-            {
-                "groups": ["safe-group", "项目/交易群"],
-                "senders": ["safe-sender"],
-                "includeKeywords": ["up"],
-                "excludeKeywords": ["spam"],
-                "messageTypes": ["text"],
-                "regularExpressionCount": 2,
-                "includeKeywordMode": "all",
-                "regularExpressionMode": "any",
-                "timeWindows": [
-                    {
-                        "startMinuteOfDay": 60,
-                        "endMinuteOfDay": 120,
-                        "weekdays": [2],
-                        "timeZoneIdentifier": "Asia/Shanghai",
-                    }
-                ],
-                "caseSensitive": False,
-            },
-        )
-        self.assertEqual(
-            payloads["rules"]["items"][0]["actions"],
-            [
-                {"type": "local_alert", "severity": "warning", "title": "Safe alert"},
-                {"type": "enqueue_summary", "configurationId": "provider-safe"},
-                {
-                    "type": "invoke_script",
-                    "scriptId": "safe-script",
-                },
-            ],
-        )
-        self.assertEqual(payloads["rules"]["invalidRows"], 1)
-        self.assertEqual(payloads["automations"]["items"][0]["name"], "Paper buy")
-        self.assertEqual(
-            payloads["automations"]["items"][0]["condition"],
-            {
-                "allowedChains": ["base"],
-                "groups": ["safe-group"],
-                "senders": ["safe-sender"],
-                "aggregationWindowSeconds": 600,
-                "minimumMentions": 2,
-                "minimumDistinctGroups": 2,
-                "minimumMarketCapUSD": 500000,
-                "maximumMarketCapUSD": 20000000,
-                "minimumLiquidityUSD": 100000,
-                "minimumHolderCount": 100,
-                "maximumRugRatio": 0.1,
-                "requireSecurityData": True,
-            },
-        )
-        self.assertEqual(
-            payloads["automations"]["items"][0]["actions"],
-            [
-                {
-                    "type": "trade",
-                    "inputAmountNative": 0.01,
-                    "maximumSlippagePercent": 12,
-                    "maximumTradesPerDay": 2,
-                    "tokenCooldownSeconds": 86400,
-                    "antiMEV": True,
-                    "protectionOrders": [
-                        {
-                            "id": "protection-1",
-                            "kind": "stop_loss",
-                            "triggerPercent": 50,
-                            "sellPercent": 100,
-                        }
-                    ],
-                }
-            ],
-        )
-        self.assertEqual(payloads["trades"]["items"][0]["symbol"], "SAFE")
-        self.assertEqual(payloads["trades"]["items"][0]["state"], "simulated")
-        self.assertEqual(payloads["trades"]["items"][0]["network"], "base")
-        self.assertEqual(
-            payloads["trades"]["items"][0]["riskSummary"]["rugRatio"], 0.05
-        )
-        self.assertEqual(
-            payloads["settings/status"],
-            {
-                "available": True,
-                "reason": None,
-                "aiConfigured": True,
-                "speechConfigured": False,
-                "providerNames": ["OpenAI Compatible"],
-                "tradingConfigured": False,
-            },
-        )
-        self.assertEqual(payloads["diagnostics"]["available"], True)
-        self.assertEqual(payloads["diagnostics"]["sources"]["workspace"]["available"], True)
-        self.assertEqual(payloads["diagnostics"]["sources"]["configuration"]["available"], True)
-
-        combined = json.dumps(payloads, ensure_ascii=False)
-        for forbidden in (
-            "NEVER_EXPOSE_THIS",
-            "NEVER_EXPOSE",
-            "configuration_json",
-            "intent_json",
-            "Authorization",
-            "Bearer ",
-            "www.",
-            "/Users/secret",
-            "/Users/public",
-            "requestHeaders",
-            "signatureValue",
-            "credentialPath",
-            "webhookUrl",
-            self.workspace_path,
-            self.configuration_path,
-        ):
-            self.assertNotIn(forbidden, combined)
-        lowered = combined.lower()
-        for forbidden in (
-            "x-auth-token",
-            "cookie",
-            "session=",
-            "../config/prod.toml",
-            "ssh://user@host/repo",
-        ):
-            self.assertNotIn(forbidden, lowered)
-
-        self.assertIn("Safe summary", combined)
-        self.assertIn("https://dexscreener.com/base/0xsafe", combined)
-        self.assertIn("Safe Coin", combined)
-        self.assertIn('"symbol": "SAFE"', combined)
-        invoke_action = payloads["rules"]["items"][0]["actions"][2]
-        self.assertEqual(invoke_action["scriptId"], "safe-script")
-        self.assertNotIn("arguments", invoke_action)
-
-    def test_missing_workspace_database_returns_available_false_without_creating_it(self):
-        os.unlink(self.workspace_path)
-        for endpoint in ("alerts", "analyses", "meme", "rules", "automations", "trades"):
-            with self.subTest(endpoint=endpoint):
-                status, payload = self.request("/api/" + endpoint)
-                self.assertEqual(status, 200)
-                self.assertEqual(payload["available"], False)
-                self.assertEqual(payload["reason"], "source_unavailable")
-                self.assertEqual(payload["items"], [])
-        status, settings = self.request("/api/settings/status")
-        self.assertEqual(status, 200)
-        self.assertEqual(settings["available"], False)
-        self.assertEqual(settings["reason"], "source_unavailable")
-        self.assertEqual(settings["providerNames"], [])
-        self.assertEqual(settings["tradingConfigured"], False)
-        self.assertFalse(os.path.exists(self.workspace_path))
-
-    def test_missing_workspace_parent_is_unavailable_not_permission_denied(self):
-        missing_path = os.path.join(
-            self.temporary_directory.name, "missing-parent", "workspace.sqlite3"
-        )
-        repository = WorkspaceRepository(missing_path, self.configuration_path)
-
-        self.assertEqual(repository.alerts()["reason"], "source_unavailable")
-        self.assertEqual(
-            repository.diagnostics()["sources"]["workspace"],
-            {"available": False, "reason": "source_unavailable"},
-        )
-        self.assertFalse(os.path.exists(os.path.dirname(missing_path)))
-
-    def test_settings_and_diagnostics_classify_configuration_source_failures(self):
-        missing_path = os.path.join(
-            self.temporary_directory.name, "missing-configuration.json"
-        )
-        corrupt_path = os.path.join(
-            self.temporary_directory.name, "corrupt-configuration.json"
-        )
-        with open(corrupt_path, "w", encoding="utf-8") as stream:
-            stream.write('{"apiKey":"NEVER_EXPOSE_CONFIGURATION"')
-        denied_path = os.path.join(
-            self.temporary_directory.name, "denied-configuration.json"
-        )
-        with open(denied_path, "w", encoding="utf-8") as stream:
-            stream.write("{}")
-        os.chmod(denied_path, 0o000)
-        self.addCleanup(os.chmod, denied_path, 0o600)
-
-        for path, reason in (
-            (missing_path, "source_unavailable"),
-            (corrupt_path, "source_corrupt"),
-            (denied_path, "source_permission_denied"),
-        ):
-            with self.subTest(reason=reason):
-                repository = WorkspaceRepository(self.workspace_path, path)
-                settings = repository.settings_status()
-                diagnostics = repository.diagnostics()
-                self.assertEqual(settings["available"], False)
-                self.assertEqual(settings["reason"], reason)
-                self.assertEqual(
-                    diagnostics["sources"]["configuration"],
-                    {"available": False, "reason": reason},
-                )
-                combined = json.dumps((settings, diagnostics), ensure_ascii=False)
-                self.assertNotIn("NEVER_EXPOSE_CONFIGURATION", combined)
-                self.assertNotIn(path, combined)
-
-    def test_unreadable_workspace_file_is_permission_denied(self):
-        os.chmod(self.workspace_path, 0o000)
-        try:
-            repository = WorkspaceRepository(
-                self.workspace_path, self.configuration_path
-            )
-
-            self.assertEqual(
-                repository.alerts()["reason"], "source_permission_denied"
-            )
-            self.assertEqual(
-                repository.diagnostics()["sources"]["workspace"],
-                {"available": False, "reason": "source_permission_denied"},
-            )
-        finally:
-            os.chmod(self.workspace_path, 0o600)
-
-    def test_workspace_and_configuration_detect_inaccessible_ancestors_through_aliases(self):
-        denied_directory = os.path.join(
-            self.temporary_directory.name, "workspace-denied-ancestor"
-        )
-        nested_directory = os.path.join(denied_directory, "nested")
-        os.makedirs(nested_directory, mode=0o700)
-        denied_workspace = os.path.join(nested_directory, "workspace.sqlite3")
-        denied_configuration = os.path.join(
-            nested_directory, "configuration-center.json"
-        )
-        os.rename(self.workspace_path, denied_workspace)
-        os.rename(self.configuration_path, denied_configuration)
-        workspace_alias = os.path.join(
-            self.temporary_directory.name, "workspace-denied-alias"
-        )
-        configuration_alias = os.path.join(
-            self.temporary_directory.name, "configuration-denied-alias"
-        )
-        os.symlink(denied_workspace, workspace_alias)
-        os.symlink(denied_configuration, configuration_alias)
-
-        os.chmod(denied_directory, 0o000)
-        self.addCleanup(os.chmod, denied_directory, 0o700)
-        for path in (denied_workspace, workspace_alias):
-            with self.subTest(source="workspace", alias=path == workspace_alias):
-                repository = WorkspaceRepository(path, configuration_alias)
-                self.assertEqual(
-                    repository.alerts()["reason"],
-                    "source_permission_denied",
-                )
-                self.assertEqual(
-                    repository.diagnostics()["sources"]["workspace"],
-                    {"available": False, "reason": "source_permission_denied"},
-                )
-        for path in (denied_configuration, configuration_alias):
-            with self.subTest(source="configuration", alias=path == configuration_alias):
-                repository = WorkspaceRepository(workspace_alias, path)
-                self.assertEqual(
-                    repository.settings_status()["reason"],
-                    "source_permission_denied",
-                )
-                self.assertEqual(
-                    repository.diagnostics()["sources"]["configuration"],
-                    {"available": False, "reason": "source_permission_denied"},
-                )
-
-    def test_priority_endpoint_is_read_only_and_truthfully_unavailable(self):
-        status, payload = self.request("/api/priority")
-
-        self.assertEqual(status, 200)
-        self.assertEqual(
-            payload,
-            {"available": False, "reason": "source_unavailable", "items": []},
-        )
-
-    def test_display_text_preserves_normal_unicode_punctuation_newlines_and_slashes(self):
-        title = "价格·节点…：Base/上涨 👩‍💻"
-        body = "第一行/路径\n第二行：保留原文 👨‍👩‍👧"
-        connection = sqlite3.connect(self.workspace_path)
-        connection.execute(
-            "UPDATE workspace_alerts SET title = ?, body = ? WHERE alert_id = 'alert-1'",
-            (title, body),
-        )
-        connection.commit()
-        connection.close()
-
-        status, payload = self.request("/api/alerts")
-
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["items"][0]["title"], title)
-        self.assertEqual(payload["items"][0]["body"], body)
-
-    def test_display_text_rejects_bidi_controls_without_rejecting_emoji_joiners(self):
-        connection = sqlite3.connect(self.workspace_path)
-        connection.execute(
-            "UPDATE workspace_alerts SET title = ?, body = ? WHERE alert_id = 'alert-1'",
-            ("safe\u202eevil", "emoji family 👨‍👩‍👧"),
-        )
-        connection.commit()
-        connection.close()
-
-        status, payload = self.request("/api/alerts")
-
-        self.assertEqual(status, 200)
-        self.assertIsNone(payload["items"][0]["title"])
-        self.assertEqual(payload["items"][0]["body"], "emoji family 👨‍👩‍👧")
-
-    def test_colon_event_ids_survive_projection_and_resolve_exact_source_messages(self):
-        event_id = "41:0000000000000029:legacy-payload"
-        connection = sqlite3.connect(self.workspace_path)
-        connection.execute(
-            "UPDATE workspace_alerts SET source_event_ids_json = ? WHERE alert_id = 'alert-1'",
-            (json.dumps([event_id]),),
-        )
-        connection.commit()
-        connection.close()
-        connection = sqlite3.connect(self.message_database)
-        connection.execute(
-            """
-            INSERT INTO messages(
-              event_id, conversation_id, group_name, sender_display_name, content,
-              message_type, observed_at, source_sequence
-            ) VALUES (?, 1, '安全群', '来源成员', '带冒号 ID 的真实来源', 'text', 1725256801, 41)
-            """,
-            (event_id,),
-        )
-        connection.commit()
-        connection.close()
-
-        status, payload = self.request("/api/alerts")
-
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["items"][0]["sourceEventIds"], [event_id])
-        self.assertEqual(
-            [item["eventId"] for item in payload["items"][0]["sourceMessages"]],
-            [event_id],
-        )
-
-    def test_alert_source_alias_resolves_a_distinct_persisted_message_row(self):
-        alias_event_id = "legacy-native-event-id"
-        connection = sqlite3.connect(self.message_database)
-        connection.executescript(
-            """
-            CREATE TABLE message_event_aliases(
-              alias_event_id TEXT PRIMARY KEY,
-              message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-              created_at REAL NOT NULL
-            );
-            CREATE INDEX message_event_aliases_message_idx
-              ON message_event_aliases(message_id);
-            """
-        )
-        message_id = connection.execute(
-            "SELECT id FROM messages WHERE event_id = 'event-a'"
-        ).fetchone()[0]
-        connection.execute(
-            "INSERT INTO message_event_aliases(alias_event_id, message_id, created_at) "
-            "VALUES (?, ?, ?)",
-            (alias_event_id, message_id, time.time()),
-        )
-        connection.commit()
-        connection.close()
-        connection = sqlite3.connect(self.workspace_path)
-        connection.execute(
-            "UPDATE workspace_alerts SET source_event_ids_json = ? WHERE alert_id = 'alert-1'",
-            (json.dumps([alias_event_id]),),
-        )
-        connection.commit()
-        connection.close()
-
-        status, payload = self.request("/api/alerts")
-
-        self.assertEqual(status, 200)
-        alert = payload["items"][0]
-        self.assertEqual(alert["sourceEventIds"], [alias_event_id])
-        self.assertEqual(len(alert["sourceMessages"]), 1)
-        self.assertEqual(alert["sourceMessages"][0]["eventId"], alias_event_id)
-        self.assertEqual(
-            alert["sourceMessages"][0]["content"],
-            "真实来源 https://dexscreener.com/base/0xsafe",
-        )
-
-    def test_alert_source_quarantine_overrides_a_stale_active_alias_row(self):
-        alias_event_id = "ambiguous-legacy-compatibility-id"
-        connection = sqlite3.connect(self.message_database)
-        connection.executescript(
-            """
-            CREATE TABLE message_event_aliases(
-              alias_event_id TEXT PRIMARY KEY,
-              message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-              created_at REAL NOT NULL
-            );
-            CREATE TABLE message_event_alias_quarantine(
-              alias_event_id TEXT PRIMARY KEY,
-              version INTEGER NOT NULL,
-              claimant_message_ids_json TEXT NOT NULL,
-              quarantined_at REAL NOT NULL
-            );
-            """
-        )
-        message_id = connection.execute(
-            "SELECT id FROM messages WHERE event_id = 'event-a'"
-        ).fetchone()[0]
-        connection.execute(
-            "INSERT INTO message_event_aliases(alias_event_id, message_id, created_at) "
-            "VALUES (?, ?, ?)",
-            (alias_event_id, message_id, time.time()),
-        )
-        connection.execute(
-            "INSERT INTO message_event_alias_quarantine("
-            "alias_event_id, version, claimant_message_ids_json, quarantined_at"
-            ") VALUES (?, 2026090305, '[1,2]', ?)",
-            (alias_event_id, time.time()),
-        )
-        connection.commit()
-        connection.close()
-        connection = sqlite3.connect(self.workspace_path)
-        connection.execute(
-            "UPDATE workspace_alerts SET source_event_ids_json = ? WHERE alert_id = 'alert-1'",
-            (json.dumps([alias_event_id]),),
-        )
-        connection.commit()
-        connection.close()
-
-        status, payload = self.request("/api/alerts")
-
-        self.assertEqual(status, 200)
-        alert = payload["items"][0]
-        self.assertEqual(alert["sourceEventIds"], [alias_event_id])
-        self.assertEqual(alert["sourceMessages"], [])
-
-    def test_alert_source_quarantine_does_not_hide_an_exact_event_row(self):
-        event_id = "event-a"
-        connection = sqlite3.connect(self.message_database)
-        connection.executescript(
-            """
-            CREATE TABLE message_event_alias_quarantine(
-              alias_event_id TEXT PRIMARY KEY,
-              version INTEGER NOT NULL,
-              claimant_message_ids_json TEXT NOT NULL,
-              quarantined_at REAL NOT NULL
-            );
-            """
-        )
-        connection.execute(
-            "INSERT INTO message_event_alias_quarantine("
-            "alias_event_id, version, claimant_message_ids_json, quarantined_at"
-            ") VALUES (?, 2026090305, '[1,2]', ?)",
-            (event_id, time.time()),
-        )
-        connection.commit()
-        connection.close()
-        connection = sqlite3.connect(self.workspace_path)
-        connection.execute(
-            "UPDATE workspace_alerts SET source_event_ids_json = ? WHERE alert_id = 'alert-1'",
-            (json.dumps([event_id]),),
-        )
-        connection.commit()
-        connection.close()
-
-        status, payload = self.request("/api/alerts")
-
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["items"][0]["sourceMessages"][0]["eventId"], event_id)
-        self.assertEqual(
-            payload["items"][0]["sourceMessages"][0]["content"],
-            "真实来源 https://dexscreener.com/base/0xsafe",
-        )
-
-    def test_workspace_lock_is_reported_as_retriable_source_locked(self):
-        lock = sqlite3.connect(self.workspace_path, timeout=0)
-        lock.execute("BEGIN EXCLUSIVE")
-        self.addCleanup(lock.close)
-
-        status, payload = self.request("/api/alerts")
-
-        settings_status, settings = self.request("/api/settings/status")
-
-        lock.rollback()
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["available"], False)
-        self.assertEqual(payload["reason"], "source_locked")
-        self.assertEqual(settings_status, 200)
-        self.assertEqual(settings["available"], False)
-        self.assertEqual(settings["reason"], "source_locked")
-        self.assertEqual(settings["providerNames"], [])
-        self.assertEqual(settings["tradingConfigured"], False)
-
-        lock.execute("BEGIN EXCLUSIVE")
-        diagnostics = WorkspaceRepository(
-            self.workspace_path, self.configuration_path
-        ).diagnostics()
-        lock.rollback()
-        self.assertEqual(
-            diagnostics["sources"]["workspace"],
-            {"available": False, "reason": "source_locked"},
-        )
-
-    def test_workspace_health_validates_columns_consumed_by_native_endpoints(self):
-        incomplete_path = os.path.join(
-            self.temporary_directory.name, "missing-alert-severity.sqlite3"
-        )
-        source = sqlite3.connect(self.workspace_path)
-        incomplete = sqlite3.connect(incomplete_path)
-        source.backup(incomplete)
-        source.close()
-        columns = [
-            row[1]
-            for row in incomplete.execute("PRAGMA table_info(workspace_alerts)").fetchall()
-            if row[1] != "severity"
-        ]
-        selection = ", ".join(columns)
-        incomplete.executescript(
-            """
-            ALTER TABLE workspace_alerts RENAME TO workspace_alerts_complete;
-            CREATE TABLE workspace_alerts AS
-              SELECT {selection} FROM workspace_alerts_complete;
-            DROP TABLE workspace_alerts_complete;
-            """.format(selection=selection)
-        )
-        incomplete.commit()
-        incomplete.close()
-
-        repository = WorkspaceRepository(incomplete_path, self.configuration_path)
-
-        self.assertEqual(
-            repository.diagnostics()["sources"]["workspace"],
-            {"available": False, "reason": "schema_incompatible"},
-        )
-        self.assertEqual(repository.alerts()["reason"], "schema_incompatible")
-        self.assertEqual(repository.settings_status()["available"], False)
-        self.assertEqual(repository.settings_status()["reason"], "schema_incompatible")
-
-    def test_workspace_schema_corruption_and_permission_states_are_distinct(self):
-        schema_path = os.path.join(self.temporary_directory.name, "schema-only.sqlite3")
-        connection = sqlite3.connect(schema_path)
-        connection.execute("CREATE TABLE unrelated(value INTEGER)")
-        connection.close()
-        schema_repository = WorkspaceRepository(schema_path, self.configuration_path)
-        self.assertEqual(schema_repository.alerts()["reason"], "schema_incompatible")
-        self.assertEqual(
-            schema_repository.diagnostics()["sources"]["workspace"],
-            {"available": False, "reason": "schema_incompatible"},
-        )
-
-        for missing_table in (
-            "crypto_address_incidents",
-            "trade_automation_configuration",
-        ):
-            with self.subTest(missing_table=missing_table):
-                incomplete_path = os.path.join(
-                    self.temporary_directory.name,
-                    "missing-{}.sqlite3".format(missing_table),
-                )
-                source = sqlite3.connect(self.workspace_path)
-                incomplete = sqlite3.connect(incomplete_path)
-                source.backup(incomplete)
-                source.close()
-                incomplete.execute("DROP TABLE {}".format(missing_table))
-                incomplete.commit()
-                incomplete.close()
-                repository = WorkspaceRepository(
-                    incomplete_path, self.configuration_path
-                )
-                self.assertEqual(
-                    repository.diagnostics()["sources"]["workspace"],
-                    {"available": False, "reason": "schema_incompatible"},
-                )
-
-        corrupt_path = os.path.join(self.temporary_directory.name, "corrupt.sqlite3")
-        with open(corrupt_path, "wb") as stream:
-            stream.write(b"not a sqlite database")
-        corrupt_repository = WorkspaceRepository(corrupt_path, self.configuration_path)
-        self.assertEqual(corrupt_repository.alerts()["reason"], "source_corrupt")
-        self.assertEqual(
-            corrupt_repository.diagnostics()["sources"]["workspace"],
-            {"available": False, "reason": "source_corrupt"},
-        )
-
-        denied_directory = os.path.join(self.temporary_directory.name, "denied")
-        os.mkdir(denied_directory, 0o700)
-        denied_path = os.path.join(denied_directory, "workspace.sqlite3")
-        connection = sqlite3.connect(denied_path)
-        connection.execute("CREATE TABLE unrelated(value INTEGER)")
-        connection.close()
-        os.chmod(denied_directory, 0o000)
-        try:
-            denied_repository = WorkspaceRepository(denied_path, self.configuration_path)
-            self.assertEqual(denied_repository.alerts()["reason"], "source_permission_denied")
-            self.assertEqual(
-                denied_repository.diagnostics()["sources"]["workspace"],
-                {"available": False, "reason": "source_permission_denied"},
-            )
-        finally:
-            os.chmod(denied_directory, 0o700)
-
-    def test_analyses_include_jobs_that_do_not_have_results(self):
-        status, payload = self.request("/api/analyses")
-        self.assertEqual(status, 200)
-        by_job = {item["jobId"]: item for item in payload["items"]}
-        expected_states = {
-            "job-pending": "pending",
-            "job-running": "running",
-            "job-retry": "retry_wait",
-            "job-failed": "failed",
-            "job-cancelled": "cancelled",
-        }
-        self.assertEqual(set(by_job), {"job-1"} | set(expected_states))
-        for job_id, state in expected_states.items():
-            with self.subTest(job_id=job_id):
-                self.assertEqual(by_job[job_id]["state"], state)
-                self.assertEqual(by_job[job_id]["analysisId"], None)
-                self.assertNotIn("summary", by_job[job_id])
-
-    def test_alert_sources_are_looked_up_by_exact_event_id_beyond_latest_page(self):
-        connection = sqlite3.connect(self.message_database)
-        connection.executemany(
-            """
-            INSERT INTO messages(
-              event_id, conversation_id, group_name, sender_display_name, content,
-              message_type, observed_at, source_sequence
-            ) VALUES (?, 1, 'noise-group', 'noise-sender', 'newer noise', 'text', ?, ?)
-            """,
-            [
-                ("event-noise-{:03d}".format(index), 1725256801 + index, index + 2)
-                for index in range(205)
-            ],
-        )
-        connection.commit()
-        connection.close()
-
-        status, payload = self.request("/api/alerts")
-
-        self.assertEqual(status, 200)
-        self.assertEqual(
-            [item["eventId"] for item in payload["items"][0]["sourceMessages"]],
-            ["event-a"],
-        )
-
-    def test_native_codable_workspace_blobs_are_projected_to_safe_dtos(self):
-        _, meme = self.request("/api/meme")
-        _, automations = self.request("/api/automations")
-        _, trades = self.request("/api/trades")
-
-        self.assertEqual(meme["items"][0]["symbol"], "SAFE")
-        self.assertEqual(meme["items"][0]["priceUsd"], 1.25)
-        self.assertEqual(meme["items"][0]["marketCapUsd"], 500000)
-        self.assertEqual(
-            automations["items"][0]["condition"]["maximumRugRatio"], 0.1
-        )
-        self.assertEqual(
-            automations["items"][0]["actions"][0]["protectionOrders"][0]["kind"],
-            "stop_loss",
-        )
-        self.assertEqual(trades["items"][0]["symbol"], "SAFE")
-        self.assertEqual(trades["items"][0]["network"], "base")
-        self.assertEqual(trades["items"][0]["riskSummary"]["rugRatio"], 0.05)
-
-    def test_unknown_nested_fields_never_return_secret_material(self):
-        payloads = [
-            self.request("/api/analyses")[1],
-            self.request("/api/rules")[1],
-            self.request("/api/meme")[1],
-            self.request("/api/automations")[1],
-            self.request("/api/trades")[1],
-        ]
-        combined = json.dumps(payloads, ensure_ascii=False)
-        for forbidden in (
-            "NEVER_EXPOSE",
-            "Authorization",
-            "Bearer ",
-            "/Users/secret",
-            "requestHeaders",
-            "signatureValue",
-            "credentialPath",
-            "webhookUrl",
-        ):
-            self.assertNotIn(forbidden, combined)
-
-    def test_nonstandard_json_constant_is_an_invalid_row(self):
-        connection = sqlite3.connect(self.workspace_path)
-        connection.execute(
-            "UPDATE ca_watch_pool_items SET item_json = ?",
-            ('{"symbol":"bad","priceUsd":NaN}',),
-        )
-        connection.commit()
-        connection.close()
-
-        status, payload = self.request("/api/meme")
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["items"], [])
-        self.assertEqual(payload["invalidRows"], 1)
-
-
 class LanServerCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -2617,12 +2009,10 @@ class LanServerCliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             return self.cli.parse_options(arguments)
 
-    def test_configuration_defaults_to_the_explicit_configuration_center(self):
+    def test_native_configuration_defaults_to_unused(self):
         options = self.parse_options([])
-        self.assertEqual(
-            options.configuration,
-            os.path.expanduser("~/Library/Application Support/wxFomo/configuration-center.json"),
-        )
+        self.assertEqual(options.configuration, "")
+        self.assertEqual(options.workspace_database, "")
 
     def test_configuration_accepts_an_explicit_path(self):
         options = self.parse_options(["--configuration", "/tmp/test-configuration.json"])
@@ -2635,6 +2025,13 @@ class LanServerCliTests(unittest.TestCase):
         self.assertEqual(
             options.notification_database, "/tmp/test-notification.sqlite3"
         )
+
+    def test_analysis_database_has_a_private_default_and_accepts_an_explicit_path(self):
+        self.assertEqual(self.parse_options([]).analysis_database, self.cli.ANALYSIS_DATABASE)
+        options = self.parse_options(
+            ["--analysis-database", "/tmp/test-analysis.sqlite3"]
+        )
+        self.assertEqual(options.analysis_database, "/tmp/test-analysis.sqlite3")
 
     def test_group_config_defaults_to_the_listener_default(self):
         options = self.parse_options([])
@@ -2684,6 +2081,7 @@ class LanServerCliTests(unittest.TestCase):
     def test_sensitive_custom_paths_inside_static_root_are_rejected(self):
         cases = (
             ("--notification-database", "notification.sqlite3"),
+            ("--analysis-database", "analysis.sqlite3"),
             ("--database", "messages.sqlite3"),
             ("--workspace-database", "workspace.sqlite3"),
             ("--configuration", "configuration.json"),
@@ -2712,6 +2110,7 @@ class LanServerCliTests(unittest.TestCase):
     def test_sensitive_hardlinks_to_allowlisted_assets_are_rejected(self):
         cases = (
             ("notification", ("--notification-database",)),
+            ("analysis", ("--analysis-database",)),
             ("messages", ("--database",)),
             ("workspace", ("--workspace-database",)),
             ("configuration", ("--configuration",)),
