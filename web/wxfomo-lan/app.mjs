@@ -67,6 +67,7 @@ const model = {
   statusMessage: "等待连接",
   statusKind: "",
   readOnlyPayload: null,
+  analysisViewState: {},
   readOnlyLoading: false,
   messageRetryAttempt: 0,
   bootstrapRetryAttempt: 0,
@@ -626,6 +627,7 @@ function readOnlyWorkbench() {
       root: host,
       payload: normalizeReadOnlyPayload(page.id, payload),
       api: { requestJson, copyText },
+      viewState: page.id === "analyses" ? model.analysisViewState : undefined,
     });
   }
   const footer = element("footer", "workbench-footer");
@@ -646,7 +648,7 @@ function renderWorkbench() {
   }
   const openSources = new Set(Array.from(appShell.querySelectorAll("[data-disclosure-key]"))
     .filter(node => node.open).map(node => node.getAttribute("data-disclosure-key")));
-  const scrollSelector = model.route.readOnlyPage ? ".workspace-page-host" : ".feed-scroll";
+  const scrollSelector = model.route.readOnlyPage ? ".workspace-page-content" : ".feed-scroll";
   const oldScroll = appShell.querySelector(scrollSelector);
   const scrollTop = oldScroll ? oldScroll.scrollTop : 0;
   appShell.replaceChildren(
@@ -1085,6 +1087,7 @@ function showLogin(message) {
   model.bootstrap = null;
   Object.assign(model, resetMessageSession());
   model.readOnlyPayload = null;
+  model.analysisViewState = {};
   model.readOnlyLoading = false;
   model.messageRetryAttempt = 0;
   model.bootstrapRetryAttempt = 0;

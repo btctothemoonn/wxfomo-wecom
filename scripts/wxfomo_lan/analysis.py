@@ -10,14 +10,16 @@ import sqlite3
 import stat
 import unicodedata
 import urllib.parse
+from time import time as current_time
 
 from .messages import MessageSourceUnavailable, merge_message_annotations
 from .cross_ca import cross_ca_cards
 from .rules import RULE_CATALOG, rules_payload
+from .scheduler import SHANGHAI_OFFSET
+from .briefing import BriefingError, references as briefing_references, validate_briefing
 
 
 MAX_ROWS = 1000
-MAX_ANALYSIS_REPORTS = 30
 MAX_EVENT_IDS = 1000
 MAX_JSON_BYTES = 64 * 1024
 MAX_RESULT_ITEMS = 200
@@ -310,12 +312,19 @@ def _project_result(value, frozen_ids):
             "sourceMessageIDs": address_sources,
             "sourceReferences": list(address_sources),
         })
+    if 'briefing' in value:
+        try:
+            result['briefing'] = validate_briefing(value['briefing'], allowed_sources)
+        except BriefingError:
+            return None
     return result
 
 
 def _source_message_ids(item, frozen_ids):
     """Bound message hydration while preferring the result's verified citations."""
     groups = [item["sourceReferences"]]
+    if 'briefing' in item:
+        groups.append(briefing_references(item['briefing']))
     groups.extend(card["sourceMessageIDs"] for card in item.get("crossGroupCA", {}).get("items", ()))
     for name in ("topics", "findings", "cryptoAddresses"):
         groups.extend(document["sourceReferences"] for document in item.get(name, ()))
@@ -532,6 +541,16 @@ class AnalysisRepository(object):
         )
 
     def analyses(self, messages):
+        day = 24 * 3600
+        end = (int((current_time() + SHANGHAI_OFFSET) // day) + 1) * day - SHANGHAI_OFFSET
+        start = end - 3 * day
+        timezone = datetime.timezone(datetime.timedelta(seconds=SHANGHAI_OFFSET))
+        date_range = {
+            "minDate": datetime.datetime.fromtimestamp(start, timezone).date().isoformat(),
+            "maxDate": datetime.datetime.fromtimestamp(end - 1, timezone).date().isoformat(),
+            "timeZone": "Asia/Shanghai",
+            "dateBasis": "windowEnd",
+        }
         reason, rows = self._rows(
             _ANALYSES_SCHEMA,
             "SELECT jobs.job_id, jobs.cadence, jobs.window_start, jobs.window_end, "
@@ -540,10 +559,12 @@ class AnalysisRepository(object):
             "jobs.created_at, jobs.updated_at, results.analysis_id, "
             "results.result_json, results.model FROM analysis_jobs AS jobs "
             "LEFT JOIN analysis_results AS results ON results.job_id=jobs.job_id "
-            "ORDER BY jobs.window_end DESC, jobs.job_id ASC LIMIT {}".format(MAX_ANALYSIS_REPORTS),
+            "WHERE jobs.window_end >= ? AND jobs.window_end < ? "
+            "ORDER BY jobs.window_end DESC, jobs.job_id ASC",
+            (start, end),
         )
         if reason:
-            return _unavailable(reason)
+            return dict(_unavailable(reason), dateRange=date_range)
         items = []
         invalid_rows = 0
         for row in rows:
@@ -606,11 +627,26 @@ class AnalysisRepository(object):
             item["crossGroupCA"]["sourcesComplete"] = len(source_map) == len(source_ids)
             message_ids = _source_message_ids(item, source_ids)
             source_messages = [source_map[event_id] for event_id in message_ids if event_id in source_map]
+            local_refs = {event_id: 'M{:04d}'.format(index) for index, event_id in enumerate(source_ids, 1)}
+            for message in source_messages:
+                message['referenceId'] = local_refs[message['eventId']]
             item["sourceMessages"] = merge_message_annotations(
                 source_messages, self.annotations(message_ids)
             )
+            item['scope'] = {
+                'groupNames': sorted({m['group'] for m in all_sources if m.get('group')}),
+                'windowStart': window_start, 'windowEnd': window_end,
+                'timeZone': 'Asia/Shanghai', 'timeBasis': 'notification_observed_at',
+                'dataCutoff': max((m['observedAt'] for m in all_sources if m.get('observedAt')), default=None),
+                'frozenCount': len(source_ids),
+                'analyzedCount': len(source_ids) if state == 'succeeded' else None,
+                'readableCount': len(source_map), 'missingCount': len(source_ids) - len(source_map),
+                'displayedSourceCount': len(source_messages),
+                'unknownTimeCount': sum(not m.get('observedAt') for m in all_sources),
+                'completeChatHistory': False, 'externalVerification': False,
+            }
             items.append(item)
-        return _available(items, invalid_rows)
+        return dict(_available(items, invalid_rows), dateRange=date_range)
 
     def settings_status(self):
         reason, rows = self._rows(

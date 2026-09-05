@@ -392,17 +392,189 @@ function testAnalysisReportsRenderCadenceWindowsSourcesAndReadOnlyStates() {
     api: {},
   });
   for (const expected of [
-    "2 小时", "6 小时", "24 小时", "需要配置凭据", "等待重试", "[", ")",
-    "主题", "风险发现", "0xCA", "完整来源正文", "总结来源 event-a",
+    "2 小时", "6 小时", "24 小时", "需要配置凭据",
+    "主题", "风险发现", "0xCA", "完整来源正文", "查看原文",
     "经 搬运机器人 转发", "阿甲: <img src=x onerror=alert(1)>完整来源正文",
-    "跨群 CA", "2 群 · 3 条提及 · 2 条去重发言 · 1 条重复传播", "甲群、乙群",
-    "链待确认，暂不跨群合并", "部分原文不可用", "来源示例", "未生成单独的 AI 摘要",
+    "跨群 CA", "2 群", "3 条提及", "2 条去重发言", "1 条重复传播", "甲群、乙群",
+    "链待确认，暂不跨群合并", "部分原文不可用", "未生成单独的 AI 摘要",
   ]) {
     assert.ok(root.textContent.includes(expected), expected);
   }
   assert.strictEqual(descendants(root).filter((node) => node.attributes["data-write-action"]).length, 0);
   assert.strictEqual(descendants(root).filter((node) => node.tagName === "IMG").length, 0);
   assert.ok(descendants(root).some((node) => node.tagName === "DETAILS"));
+}
+
+function testBriefingSwitchesOneReportAtATimeAndKeepsHistorySelection() {
+  const root = fakeRoot();
+  const viewState = {};
+  const report = (jobId, cadence, hour, summary, state = "succeeded") => ({
+    jobId, cadence, summary, state,
+    windowStart: "2026-09-04T00:00:00Z", windowEnd: `2026-09-04T${hour}:00:00Z`,
+  });
+  const old = report("older", "two_hour", "02", "较早简报正文");
+  const latest = report("latest", "two_hour", "04", "最新简报正文");
+  const six = report("six", "six_hour", "06", "六小时简报正文");
+  const payload = { available: true, items: [old, six, latest] };
+  const draw = () => renderAnalyses({root, payload, api: {}, viewState});
+  draw();
+  assert.ok(root.textContent.includes("最新简报正文"));
+  assert.ok(!root.textContent.includes("较早简报正文"), "old reports must not all expand");
+  assert.ok(!root.textContent.includes("六小时简报正文"));
+  const cadence = label => descendants(root).find(n => n.tagName === "BUTTON" && n.textContent === label);
+  cadence("6 小时").click();
+  assert.ok(root.textContent.includes("六小时简报正文"));
+  cadence("24 小时").click();
+  assert.ok(root.textContent.includes("暂无"));
+  assert.ok(!root.textContent.includes("六小时简报正文"), "empty periods must not retain a different period's report");
+  cadence("2 小时").click();
+  const history = descendants(root).find(n => n.tagName === "SELECT");
+  assert.ok(history, "historical reports must remain selectable");
+  history.value = "older";
+  history.listeners.change({ target: history });
+  assert.ok(root.textContent.includes("较早简报正文"));
+  payload.items.push(report("newer", "two_hour", "08", "后来生成的正文"));
+  draw();
+  assert.ok(root.textContent.includes("较早简报正文"), "refresh must keep an explicitly selected report");
+  assert.ok(!root.textContent.includes("后来生成的正文"));
+  assert.strictEqual(descendants(root).filter(n => n.tagName === "ARTICLE" && n.className.includes("analysis-result")).length, 1);
+}
+
+function testStructuredBriefingRendersSixSectionsAndBusinessFallback() {
+  const root = fakeRoot();
+  const address = `0x${"aB".repeat(20)}`;
+  const note = text => ({text, source_message_ids: ["e1"]});
+  const report = {
+    jobId: "v2", cadence: "two_hour", state: "succeeded", summary: "摘要",
+    windowStart: "2026-09-06T00:00:00Z", windowEnd: "2026-09-06T02:00:00Z",
+    scope: {groupNames: ["甲群"], frozenCount: 100, analyzedCount: 100, readableCount: 99,
+      missingCount: 1, displayedSourceCount: 99, timeZone: "Asia/Shanghai",
+      dataCutoff: "2026-09-06T01:59:00Z", completeChatHistory: false},
+    sourceMessages: [{eventId: "e1", referenceId: "M0001", group: "甲群", sender: "阿甲",
+      observedAt: "2026-09-06T01:00:00Z", content: `阿甲说买入 ${address}`}],
+    briefing: {version: 2, kind: "market", quick_read: {focus: note("据甲自述已买入"), news: note("消息待核实"), risk: note("存在分歧")},
+      projects: [{name: "Test / TEST / 测试币", chain: "未确认", summary: "据甲自述买入",
+        catalysts: "未提供", latest: "乙随后质疑", risks: "质疑并非事实",
+        data: [{value: "100", unit: "USD", source: "甲自述", recorded_at: "未提供", kind: "个人预测", source_message_ids: ["e1"]}],
+        addresses: [{address, chain: "未确认", source_message_ids: ["e1"]}], source_message_ids: ["e1"]}],
+      events: [{event: "<img src=x onerror=alert(1)>", asset: "Test", nature: "推测", impact: "待核实", pending: "缺依据", source_message_ids: ["e1"]}],
+      gaps: [note("图片未读取")], business: {progress: [], notices: [], blockers: [], tasks: []}}
+  };
+  renderAnalyses({root, api: {}, payload: {available: true, items: [report]}});
+  for (const text of ["本期范围", "10秒速读", "重点标的与大盘", "消息面与风险", "CA索引", "来源与缺口",
+    "实际分析 100 条", "1 条原文", "M0001", "阿甲", "甲群", "采集时间", "Asia/Shanghai", address,
+    "个人预测", "USD", "完整群聊", "未进行外部核验"]) {
+    assert.ok(root.textContent.includes(text), text);
+  }
+  assert.ok(root.querySelector(".briefing-columns"));
+  assert.strictEqual(descendants(root).filter(n => n.tagName === "IMG").length, 0);
+  assert.ok(descendants(root).filter(n => n.className === "briefing-sources").every(n => !n.open));
+  report.briefing.kind = "business";
+  report.briefing.projects = []; report.briefing.events = [];
+  report.briefing.business.tasks = [{...note("补充文档"), owner: "未提供", deadline: "未提供"}];
+  renderAnalyses({root, api: {}, payload: {available: true, items: [report]}});
+  for (const text of ["关键进展", "重要通知", "风险阻塞", "待办清单", "负责人：未提供", "截止时间：未提供"]) {
+    assert.ok(root.textContent.includes(text), text);
+  }
+  assert.ok(!root.textContent.includes("重点标的与大盘"));
+}
+
+function testBriefingKeepsSourcesCollapsedAndUsesChineseRiskLabels() {
+  const root = fakeRoot();
+  const id = "internal-event-id-that-must-not-clutter-the-report";
+  renderAnalyses({ root, api: {}, payload: { available: true, items: [{
+    jobId: "safe", cadence: "two_hour", state: "succeeded", summary: "一段总述",
+    summarySourceMessageIDs: [id, "missing-event"],
+    topics: [{title: "<img src=x onerror=alert(1)>", summary: "话题详情", sourceMessageIDs: [id]}],
+    findings: [
+      {category: "risk", epistemicStatus: "fact", text: "资金风险", sourceMessageIDs: [id]},
+      {category: "disagreement", epistemicStatus: "inference", text: "观点有分歧", sourceMessageIDs: [id]},
+      {category: "open_question", epistemicStatus: "uncertain", text: "有待核实", sourceMessageIDs: [id]},
+      {category: "key_claim", epistemicStatus: "fact", text: "补充陈述", sourceMessageIDs: [id]},
+    ],
+    sourceMessages: [{eventId: id, group: "实际群", sender: "实际昵称", content: "可核对的原文"}],
+  }] } });
+  assert.ok(!root.textContent.includes(id), "internal source IDs must not appear as body copy");
+  assert.ok(!root.textContent.includes("missing-event"));
+  for (const text of ["本期速览", "重点话题", "风险与分歧", "群内陈述", "推测", "待核实", "实际昵称", "可核对的原文", "原文暂不可用"]) {
+    assert.ok(root.textContent.includes(text), text);
+  }
+  const risks = root.querySelector(".briefing-risks");
+  assert.ok(risks.textContent.includes("资金风险") && risks.textContent.includes("观点有分歧"));
+  assert.ok(!risks.textContent.includes("补充陈述"));
+  assert.strictEqual(descendants(root).filter(n => n.tagName === "IMG").length, 0);
+  const disclosures = descendants(root).filter(n => n.tagName === "DETAILS");
+  assert.ok(disclosures.length);
+  assert.ok(disclosures.every(n => !n.open), "details must start collapsed");
+}
+
+function testBriefingDoesNotHideFailedLatestJobBehindAnOlderSuccess() {
+  const root = fakeRoot();
+  renderAnalyses({root, api: {}, payload: {available: true, items: [{
+    jobId: "failure", cadence: "two_hour", state: "failed", windowEnd: "2026-09-04T04:00:00Z",
+    attempt: 3, maximumAttempts: 3,
+  }, {jobId: "success", cadence: "two_hour", state: "succeeded", summary: "此前成功的总结",
+    windowEnd: "2026-09-04T02:00:00Z"}]}});
+  assert.ok(root.textContent.includes("执行失败") && root.textContent.includes("此前成功的总结"));
+  const history = descendants(root).find(n => n.tagName === "SELECT");
+  assert.ok(history);
+  history.value = "failure"; history.listeners.change({target: history});
+  assert.ok(!root.textContent.includes("此前成功的总结"));
+  assert.ok(root.textContent.includes("尚无总结正文"));
+}
+
+function testBriefingCollapsesExtraCAsWithoutLosingReferences() {
+  const root = fakeRoot();
+  const cards = Array.from({length: 6}, (_, index) => ({
+    address: `CA-${index}`, network: "solana", groupCount: 2,
+    summary: `讨论摘要-${index}`, sourceMessageIDs: [`ca-event-${index}`],
+  }));
+  renderAnalyses({root, api: {}, payload: {available: true, items: [{
+    jobId: "many-ca", cadence: "two_hour", state: "succeeded", summary: "CA 简报",
+    crossGroupCA: {items: cards, sourcesComplete: true, total: 6},
+    sourceMessages: cards.map((_, index) => ({eventId: `ca-event-${index}`, group: "群", sender: "昵称", content: `原文-${index}`})),
+  }]}});
+  const panel = root.querySelector(".briefing-ca");
+  assert.strictEqual(panel.children.filter(n => n.className === "briefing-ca-card").length, 5);
+  const more = panel.querySelector(".briefing-more");
+  assert.ok(more && !more.open);
+  assert.ok(more.textContent.includes("CA-5") && more.textContent.includes("原文-5"));
+}
+
+function testBriefingSelectsShanghaiEndDateWithinThreeDays() {
+  const root = fakeRoot();
+  const viewState = {};
+  const report = (id, end) => ({jobId: id, summary: `正文-${id}`, cadence: "two_hour", state: "succeeded",
+    windowStart: "2026-09-02T00:00:00Z", windowEnd: end});
+  const payload = {available: true, dateRange: {minDate: "2026-09-04", maxDate: "2026-09-06", timeZone: "Asia/Shanghai", dateBasis: "windowEnd"},
+    items: [report("before", "2026-09-03T15:59:59Z"), report("oldest", "2026-09-03T16:00:00Z"),
+      report("yesterday", "2026-09-05T15:59:59Z"), report("today", "2026-09-05T16:00:00Z"),
+      report("future", "2026-09-06T16:00:00Z")]};
+  const draw = () => renderAnalyses({root, payload, api: {}, viewState});
+  draw();
+  assert.ok(root.textContent.includes("正文-today"));
+  assert.ok(!root.textContent.includes("正文-future"));
+  const picker = () => descendants(root).find(n => n.tagName === "INPUT" && n.type === "date");
+  assert.ok(picker(), "reports must be selectable by calendar date");
+  assert.strictEqual(picker().min, "2026-09-04");
+  assert.strictEqual(picker().max, "2026-09-06");
+  picker().value = "2026-09-05"; picker().listeners.change();
+  assert.ok(root.textContent.includes("正文-yesterday"));
+  assert.ok(!root.textContent.includes("正文-today"));
+  descendants(root).find(n => n.tagName === "BUTTON" && n.textContent === "6 小时").click();
+  assert.ok(root.textContent.includes("暂无"));
+  assert.strictEqual(picker().value, "2026-09-05");
+  descendants(root).find(n => n.tagName === "BUTTON" && n.textContent === "2 小时").click();
+  payload.items.push(report("newer", "2026-09-06T10:00:00Z"));
+  draw();
+  assert.ok(root.textContent.includes("正文-yesterday"), "background refresh must preserve the date filter");
+  picker().value = "2026-09-04"; picker().listeners.change();
+  assert.ok(root.textContent.includes("正文-oldest"), "date filtering uses window end, not start");
+  payload.dateRange = {...payload.dateRange, minDate: "2026-09-05", maxDate: "2026-09-07"};
+  draw();
+  assert.ok(!root.textContent.includes("正文-oldest"), "expired selections cannot retain reports outside the new window");
+  picker().value = "2026-09-02"; picker().listeners.change();
+  assert.ok(!root.textContent.includes("正文-before"));
 }
 
 function testAnalysisPayloadNormalizesLegacySummarySources() {
@@ -1918,7 +2090,8 @@ async function testSummaryRefreshPreservesOpenSourcesAndLoadsNewReports() {
       groups: [], counts: { inbox: 1 },
     } : { available: true, items: [{ jobId: "job-1", cadence: "two_hour", state: "succeeded",
       summary: updated ? "新总结" : "旧总结",
-      sourceMessages: [{ eventId: "e1", group: "g", sender: "s", content: "离线原文" }] }] } };
+      sourceMessages: [{ eventId: "e1", group: "g", sender: "s", content: "离线原文" }] },
+      {jobId: "history", cadence: "six_hour", state: "succeeded", summary: "正在阅读的历史简报"}] } };
   };
   try {
     const url = new URL("../web/wxfomo-lan/app.mjs", import.meta.url);
@@ -1928,6 +2101,7 @@ async function testSummaryRefreshPreservesOpenSourcesAndLoadsNewReports() {
     const shell = doc.getElementById("app-shell");
     const before = descendants(shell).find(node => node.tagName === "DETAILS");
     before.open = true;
+    shell.querySelector(".workspace-page-content").scrollTop = 180;
     const heartbeat = [...timers.entries()].find(([, timer]) => timer.delay === 2000);
     assert.ok(heartbeat);
     timers.delete(heartbeat[0]); heartbeat[1].fn();
@@ -1943,6 +2117,14 @@ async function testSummaryRefreshPreservesOpenSourcesAndLoadsNewReports() {
     assert.ok(shell.textContent.includes("新总结"));
     assert.strictEqual(descendants(shell).find(node => node.tagName === "DETAILS").open, true,
       "new reports must preserve open source disclosures");
+    assert.strictEqual(shell.querySelector(".workspace-page-content").scrollTop, 180);
+    descendants(shell).find(n => n.tagName === "BUTTON" && n.textContent === "6 小时").click();
+    const nextRefresh = [...timers.entries()].find(([, timer]) => timer.delay === 30000);
+    updated = false;
+    timers.delete(nextRefresh[0]); nextRefresh[1].fn();
+    await flushMicrotasks(50);
+    assert.ok(shell.textContent.includes("正在阅读的历史简报"), "app rerenders must preserve the selected cadence");
+    assert.ok(!shell.textContent.includes("旧总结"));
     doc.visibilityState = "hidden"; doc.listeners.visibilitychange();
     assert.strictEqual(timers.size, 0, "hidden tabs stop polling");
   } finally { restoreGlobals(previous); }
@@ -2537,6 +2719,12 @@ testPublicSourceHostAllowlistMatchesTheDocumentedContract();
 testReadOnlyPageNavigationResolvesOnlyRegisteredHashes();
 testPriorityPageIsSeparateReadOnlyRouteWithCanonicalUnavailableCopy();
 testRuleAnnotationsRenderWithoutWriteControls();
+testBriefingSwitchesOneReportAtATimeAndKeepsHistorySelection();
+testBriefingKeepsSourcesCollapsedAndUsesChineseRiskLabels();
+testStructuredBriefingRendersSixSectionsAndBusinessFallback();
+testBriefingDoesNotHideFailedLatestJobBehindAnOlderSuccess();
+testBriefingCollapsesExtraCAsWithoutLosingReferences();
+testBriefingSelectsShanghaiEndDateWithinThreeDays();
 testAnalysisReportsRenderCadenceWindowsSourcesAndReadOnlyStates();
 testAnalysisPayloadNormalizesLegacySummarySources();
 testCAUnresolvedSourcesAreNotReportedAsMissingAI();

@@ -22,6 +22,8 @@ export const PUBLIC_SOURCE_HOSTS = Object.freeze([
 const PUBLIC_SOURCE_HOST_SET = new Set(PUBLIC_SOURCE_HOSTS);
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
   month: "2-digit",
   day: "2-digit",
   hour: "2-digit",
@@ -112,7 +114,12 @@ function analysisWindowLabel(item) {
   if (!start || !end || Number.isNaN(Date.parse(start)) || Number.isNaN(Date.parse(end))) {
     return "窗口未知";
   }
-  return `[${formatDate(start)}, ${formatDate(end)})`;
+  return `${formatDate(start)} 至 ${formatDate(end)}`;
+}
+
+function analysisEndDate(item) {
+  const timestamp = Date.parse(item.windowEnd);
+  return Number.isFinite(timestamp) ? new Date(timestamp + 8 * 3600000).toISOString().slice(0, 10) : "";
 }
 
 function severityLabel(value) {
@@ -185,7 +192,7 @@ function AnalysisSourceList(document, messages, scope = "") {
       document,
       "p",
       "source-message-meta",
-      `${formatValue(message.group)} · ${formatValue(message.sender)}`
+      `${message.referenceId ? `[${message.referenceId}] ` : ""}${formatValue(message.group)} · ${formatValue(message.sender)} · 采集时间 ${message.observedAt ? formatDate(message.observedAt) : "未提供"}（北京时间）`
     ));
     item.appendChild(element(document, "p", "source-message-body", message.content));
     const provenance = RelayProvenance(document, message, scope);
@@ -345,26 +352,43 @@ export function sourceReasonLabel(reason) {
   return labels[reason] || "数据源不可用";
 }
 
-export function JsonFindingList(document, findings) {
+function ReportSources(document, report, ids, key, label = "查看原文") {
+  const wanted = new Set(stringList(ids));
+  if (!wanted.size) return null;
+  const messages = (report.sourceMessages || []).filter(message => wanted.has(message.eventId));
+  const found = new Set(messages.map(message => message.eventId));
+  const disclosure = element(document, "details", "briefing-sources");
+  disclosure.setAttribute("data-disclosure-key", `${report.jobId || "legacy"}/${key}`);
+  const refs = messages.map(message => message.referenceId).filter(Boolean);
+  disclosure.appendChild(element(document, "summary", "", `${label}（${wanted.size} 条引用）${refs.length ? ` · ${refs.join(" / ")}` : ""}`));
+  const list = AnalysisSourceList(document, messages, `${report.jobId || "legacy"}/${key}`);
+  if (list) disclosure.appendChild(list);
+  if (found.size < wanted.size) {
+    disclosure.appendChild(element(document, "p", "briefing-note", `${wanted.size - found.size} 条引用的原文暂不可用，不能据此补全内容。`));
+  }
+  return disclosure;
+}
+
+export function JsonFindingList(document, findings, report = {}, scope = "findings") {
   const list = element(document, "ul", "finding-list");
-  for (const finding of Array.isArray(findings) ? findings : []) {
+  const categories = {key_claim: "主要观点", action_item: "待办事项", deadline: "时间节点",
+    risk: "风险提醒", opportunity: "潜在线索", disagreement: "观点分歧", open_question: "待确认问题"};
+  const statuses = {fact: "群内陈述", inference: "推测", uncertain: "待核实"};
+  for (const [index, finding] of (Array.isArray(findings) ? findings : []).entries()) {
     const safeFinding = object(finding);
     const item = element(document, "li", "finding-item");
     const meta = element(document, "div", "finding-meta");
     if (safeFinding.category) {
-      meta.appendChild(StatusPill(document, safeFinding.category, statusKind(safeFinding.category)));
+      meta.appendChild(StatusPill(document, categories[safeFinding.category] || "其他观点",
+        safeFinding.category === "risk" ? "warning" : "neutral"));
     }
     if (safeFinding.epistemicStatus) {
-      meta.appendChild(element(document, "span", "finding-state", safeFinding.epistemicStatus));
+      meta.appendChild(element(document, "span", "finding-state", statuses[safeFinding.epistemicStatus] || "待核实"));
     }
     item.appendChild(meta);
     item.appendChild(element(document, "p", "finding-text", safeFinding.text || "未提供结论正文"));
-    const sources = analysisSourceIDs(safeFinding);
-    if (sources.length) {
-      item.appendChild(
-        element(document, "p", "source-reference", `来源 ${sources.join(" · ")}`)
-      );
-    }
+    const sources = ReportSources(document, report, analysisSourceIDs(safeFinding), `${scope}/${index}`);
+    if (sources) item.appendChild(sources);
     list.appendChild(item);
   }
   return list;
@@ -528,153 +552,374 @@ export function renderAlerts({ root, payload, api }) {
   return cleanup;
 }
 
-function CrossCACards(document, report) {
+function CrossCACards(document, report, api) {
   const data = object(report.crossGroupCA);
-  const cards = Array.isArray(data.items) ? data.items : [];
+  const cards = Array.isArray(data.items) ? data.items
+    : (Array.isArray(report.cryptoAddresses) ? report.cryptoAddresses.map(card => ({
+      ...card, summary: card.contextSummary, sourceMessageIDs: analysisSourceIDs(card),
+    })) : []);
   if (!cards.length && data.sourcesComplete !== false) return null;
-  const panel = section(document, "跨群 CA", "仅统计本周期已捕获的消息，不代表链上验证或投资建议");
+  const panel = section(document, "跨群 CA", "先看讨论摘要；展开后核对传播统计与原文。链信息未做链上验证。");
+  panel.className += " briefing-ca";
   if (data.sourcesComplete === false) {
-    panel.appendChild(element(document, "p", "record-body", "部分原文不可用，以下统计可能不完整。"));
+    panel.appendChild(element(document, "p", "briefing-notice", "部分原文不可用，以下统计可能不完整。"));
   }
-  for (const raw of cards) {
+  const more = element(document, "details", "briefing-more");
+  more.setAttribute("data-disclosure-key", `${report.jobId}/more-ca`);
+  more.appendChild(element(document, "summary", "", `展开其余 ${Math.max(0, cards.length - 5)} 个 CA`));
+  for (const [index, raw] of cards.entries()) {
     const card = object(raw);
-    const entry = element(document, "section", "topic-card");
-    entry.appendChild(element(document, "code", "address-value", card.address));
-    entry.appendChild(element(document, "p", "source-reference", card.network === "unknown"
-      ? "链待确认，暂不跨群合并" : `${card.network} · 链信息来自消息标注或地址格式`));
-    entry.appendChild(element(document, "p", "record-body",
-      `${formatValue(card.groupCount)} 群 · ${formatValue(card.mentionCount)} 条提及 · ${formatValue(card.uniqueStatementCount)} 条去重发言 · ${formatValue(card.duplicateCount)} 条重复传播`));
-    entry.appendChild(element(document, "p", "source-reference", `涉及群：${formatValue(card.groupNames)}`));
-    if (Array.isArray(card.speakers) && card.speakers.length) {
-      entry.appendChild(element(document, "p", "source-reference", `发言昵称：${formatValue(card.speakers)}（同名不代表同一人）`));
+    if (typeof card.address !== "string" || !card.address) continue;
+    const entry = element(document, "section", "briefing-ca-card");
+    const meta = element(document, "div", "briefing-meta");
+    const networks = {unknown: "链待确认", ethereum: "以太坊", solana: "Solana", base: "Base", bsc: "BSC",
+      arbitrum: "Arbitrum", polygon: "Polygon", optimism: "Optimism", avalanche: "Avalanche"};
+    meta.appendChild(StatusPill(document, networks[card.network] || "链未标注", "neutral"));
+    if (card.groupCount !== undefined) {
+      meta.appendChild(element(document, "span", "", `${formatValue(card.groupCount)} 群讨论`));
     }
+    entry.appendChild(meta);
+    entry.appendChild(AddressControl(document, card.address, api));
     entry.appendChild(element(document, "p", "record-body", card.summary || (
       card.summaryUnavailableReason === "unresolved_sources"
         ? "已有 AI 引用暂不能唯一关联到此 CA，保留原文供核对。"
         : "本次报告未生成单独的 AI 摘要，可查看下方原文。")));
-    const ids = new Set(stringList(card.sourceMessageIDs));
     const scope = JSON.stringify([report.jobId, card.address, card.network, card.groupNames]);
-    const sources = AnalysisSourceList(document, (report.sourceMessages || []).filter(message => ids.has(message.eventId)), scope);
-    if (sources) {
-      const disclosure = element(document, "details", "relay-provenance");
-      disclosure.setAttribute("data-disclosure-key", `ca/${scope}`);
-      disclosure.appendChild(element(document, "summary", "", "来源示例（最多 5 条）"));
-      disclosure.appendChild(sources);
-      entry.appendChild(disclosure);
+    const disclosure = element(document, "details", "briefing-sources");
+    disclosure.setAttribute("data-disclosure-key", `ca/${scope}`);
+    disclosure.appendChild(element(document, "summary", "", "查看传播统计与原文"));
+    if (card.network === "unknown") {
+      disclosure.appendChild(element(document, "p", "briefing-note", "链待确认，暂不跨群合并"));
     }
-    panel.appendChild(entry);
+    if (card.mentionCount !== undefined) {
+      disclosure.appendChild(element(document, "p", "briefing-note",
+        `${formatValue(card.mentionCount)} 条提及 · ${formatValue(card.uniqueStatementCount)} 条去重发言 · ${formatValue(card.duplicateCount)} 条重复传播`));
+      disclosure.appendChild(element(document, "p", "briefing-note", `涉及群：${formatValue(card.groupNames)}`));
+    }
+    if (Array.isArray(card.speakers) && card.speakers.length) {
+      disclosure.appendChild(element(document, "p", "briefing-note", `发言昵称：${formatValue(card.speakers)}（同名不代表同一人）`));
+    }
+    const sources = ReportSources(document, report, card.sourceMessageIDs, `ca-sources/${scope}`, "查看原文示例");
+    if (sources) disclosure.appendChild(sources);
+    entry.appendChild(disclosure);
+    (index < 5 ? panel : more).appendChild(entry);
   }
-  panel.appendChild(element(document, "p", "source-reference", `显示 ${cards.length}/${formatValue(data.total)} 个 CA；重复传播按相同昵称和正文估算，不等于独立认可人数。`));
+  if (cards.length > 5) panel.appendChild(more);
+  panel.appendChild(element(document, "p", "briefing-note", `本报告收录 ${cards.length}/${formatValue(data.total === undefined ? cards.length : data.total)} 个 CA；重复传播不等于独立认可，也不构成投资建议。`));
   return panel;
 }
 
-export function renderAnalyses({ root, payload, api }) {
-  void api;
-  const page = begin(root, "分析记录", "最近 30 个任务、总结与可追溯来源；历史记录保留在本机", payload);
+function StructuredBriefing(document, report, api) {
+  const content = element(document, "div", "structured-briefing");
+  const data = report.briefing;
+  const scope = object(report.scope);
+  const source = (parent, ids, key) => {
+    const disclosure = ReportSources(document, report, ids, `v2/${key}`, "原文来源");
+    if (disclosure) parent.appendChild(disclosure);
+  };
+  const line = (parent, label, value) => {
+    const row = element(document, "p", "briefing-field");
+    row.appendChild(element(document, "strong", "", `${label}：`));
+    row.appendChild(element(document, "span", "", value || "未提供"));
+    parent.appendChild(row);
+  };
+  const note = (parent, item, key) => {
+    parent.appendChild(element(document, "p", "record-body", item.text));
+    source(parent, item.source_message_ids, key);
+  };
+  const range = section(document, "本期范围");
+  range.className += " briefing-scope";
+  line(range, "本期有记录的群", stringList(scope.groupNames).join("、") || "未提供");
+  line(range, "起止时间", `${analysisWindowLabel(report)} · Asia/Shanghai（北京时间）`);
+  line(range, "数据截止时间", scope.dataCutoff ? formatDate(scope.dataCutoff) : "未提供");
+  range.appendChild(element(document, "p", "briefing-note", `实际分析 ${Number.isInteger(scope.analyzedCount) ? scope.analyzedCount : "未提供"} 条通知记录；不等于完整群聊，未捕获的消息数量未知。`));
+  content.appendChild(range);
+
+  if (data.kind === "market") {
+    const quick = section(document, "10秒速读");
+    const grid = element(document, "div", "briefing-quick-grid");
+    for (const [key, label] of [["focus", "重点标的／大盘"], ["news", "消息面"], ["risk", "风险提醒"]]) {
+      const card = element(document, "div", "briefing-quick-card");
+      card.appendChild(element(document, "h3", "", label));
+      note(card, data.quick_read[key], `quick/${key}`);
+      grid.appendChild(card);
+    }
+    quick.appendChild(grid);
+    content.appendChild(quick);
+    const columns = element(document, "div", "briefing-columns");
+    const projects = section(document, "重点标的与大盘");
+    for (const [index, project] of data.projects.entries()) {
+      const card = element(document, "article", "briefing-project");
+      card.appendChild(element(document, "h3", "", project.name));
+      line(card, "公链／归属", `${project.chain}（群内标注，未经外部核验）`);
+      for (const [key, label] of [["summary", "核心摘要"], ["catalysts", "催化与讨论逻辑"], ["latest", "最新动态"], ["risks", "风险与分歧"]]) {
+        line(card, label, project[key]);
+      }
+      if (!project.data.length) line(card, "数据快照", "未提供");
+      for (const [i, snapshot] of project.data.entries()) {
+        line(card, "数据快照", `${snapshot.value} ${snapshot.unit} · ${snapshot.kind} · 来源：${snapshot.source} · 原文记录时间：${snapshot.recorded_at}（不是当前行情）`);
+        source(card, snapshot.source_message_ids, `project/${index}/data/${i}`);
+      }
+      if (!project.addresses.length) line(card, "完整CA", "未提供");
+      for (const address of project.addresses) card.appendChild(AddressControl(document, address.address, api));
+      source(card, project.source_message_ids, `project/${index}`);
+      projects.appendChild(card);
+    }
+    if (!data.projects.length) projects.appendChild(EmptyState(document, "无有效标的或大盘信息"));
+    columns.appendChild(projects);
+    const side = element(document, "aside", "briefing-sidebar");
+    const events = section(document, "消息面与风险");
+    for (const [index, item] of data.events.entries()) {
+      const card = element(document, "article", "briefing-event");
+      card.appendChild(element(document, "h3", "", item.event));
+      for (const [key, label] of [["asset", "涉及标的"], ["nature", "消息性质"], ["impact", "潜在影响"], ["pending", "待核实事项"]]) line(card, label, item[key]);
+      source(card, item.source_message_ids, `event/${index}`);
+      events.appendChild(card);
+    }
+    if (!data.events.length) events.appendChild(EmptyState(document, "无有效消息面或风险信息"));
+    side.appendChild(events);
+    const addresses = section(document, "CA索引", "原样地址；链与项目归属未经外部核验。讨论量不代表可信度或投资价值。");
+    let count = 0;
+    for (const [projectIndex, project] of data.projects.entries()) {
+      for (const [index, address] of project.addresses.entries()) {
+        count++;
+        const card = element(document, "article", "briefing-index-card");
+        card.appendChild(element(document, "h3", "", project.name));
+        line(card, "公链／归属", address.chain);
+        card.appendChild(AddressControl(document, address.address, api));
+        source(card, address.source_message_ids, `index/${projectIndex}/${index}`);
+        const normalized = address.address.toLowerCase().startsWith("0x") ? address.address.toLowerCase() : address.address;
+        const groups = new Set((report.sourceMessages || []).filter(m => address.source_message_ids.includes(m.eventId)).map(m => m.group));
+        const network = address.chain.toLowerCase();
+        const matches = (object(report.crossGroupCA).items || []).filter(c => c.address === normalized && (
+          c.network === network || (c.network === "unknown" && address.chain === "未确认" && c.groupNames.every(g => groups.has(g)))
+        ));
+        if (matches.length === 1) {
+          const stats = matches[0];
+          line(card, "窗口内捕获讨论", `${stats.groupCount} 群 · ${stats.mentionCount} 次提及；重复转发不是独立证实`);
+        }
+        addresses.appendChild(card);
+      }
+    }
+    if (!count) addresses.appendChild(EmptyState(document, "未提供可核对的完整CA"));
+    side.appendChild(addresses);
+    columns.appendChild(side);
+    content.appendChild(columns);
+  } else {
+    for (const [key, label] of [["progress", "关键进展"], ["notices", "重要通知"], ["blockers", "风险阻塞"], ["tasks", "待办清单"]]) {
+      const panel = section(document, label);
+      for (const [index, item] of data.business[key].entries()) {
+        const card = element(document, "article", "briefing-project");
+        note(card, item, `business/${key}/${index}`);
+        if (key === "tasks") {
+          line(card, "负责人", item.owner);
+          line(card, "截止时间", item.deadline);
+        }
+        panel.appendChild(card);
+      }
+      if (!data.business[key].length) panel.appendChild(EmptyState(document, "无有效信息"));
+      content.appendChild(panel);
+    }
+  }
+  const gaps = section(document, "来源与缺口");
+  for (const [index, item] of data.gaps.entries()) note(gaps, item, `gap/${index}`);
+  line(gaps, "未读取内容", "图片、语音、附件和链接正文未读取，不能作为结论依据。");
+  line(gaps, "时间口径", `时间均为通知采集时间；原始发送时间未提供。${scope.unknownTimeCount || 0} 条可读记录的采集时间不明。`);
+  line(gaps, "原文覆盖", `${scope.missingCount || 0} 条原文当前不可读；页面可展开 ${scope.displayedSourceCount || 0} 条原文，不代表完整群聊。`);
+  line(gaps, "引用编号", "M 开头为本报告的本地引用编号，不是企业微信平台消息ID；展开原文可查发言者、群名与采集时间。");
+  line(gaps, "外部核验", "未进行外部核验；群内自述、转述或推测不是已核验事实。");
+  source(gaps, (report.sourceMessages || []).map(m => m.eventId), "all");
+  content.appendChild(gaps);
+  return content;
+}
+
+export function renderAnalyses({ root, payload, api, viewState = {} }) {
+  const page = begin(root, "群消息简报", "按周期阅读，一次一份；仅整理已捕获消息，保留原文供核对。", payload);
   if (page.unavailable) {
     return cleanup;
   }
   const document = page.document;
-  const collection = items(payload);
-  if (appendEmptyIfNeeded(document, page.content, collection, "还没有分析记录")) {
-    return cleanup;
+  const range = object(payload.dateRange);
+  const rangeAvailable = [range.minDate, range.maxDate].every(value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value));
+  const collection = items(payload).filter(item => !rangeAvailable || (
+    analysisEndDate(item) >= range.minDate && analysisEndDate(item) <= range.maxDate
+  )).sort((a, b) =>
+    (Date.parse(b.windowEnd) || 0) - (Date.parse(a.windowEnd) || 0));
+  const cadences = ["two_hour", "six_hour", "daily"];
+  const cadenceOf = item => cadences.includes(item.cadence) ? item.cadence : "two_hour";
+  const keyOf = item => item.jobId || item.analysisId || JSON.stringify([item.windowStart, item.windowEnd]);
+  const hasReport = item => Boolean(item.summary) || [item.topics, item.findings, item.cryptoAddresses]
+    .some(value => Array.isArray(value) && value.length);
+  if (!cadences.includes(viewState.cadence)) {
+    viewState.cadence = collection.some(item => cadenceOf(item) === "two_hour") ? "two_hour" : cadenceOf(collection[0] || {});
   }
-  const split = element(document, "div", "analysis-layout");
-  const jobs = section(document, "任务", `${collection.length} 条只读记录`);
-  const jobList = element(document, "ol", "analysis-job-list");
-  for (const item of collection) {
-    const job = element(document, "li", "analysis-job");
-    job.appendChild(StatusPill(document, analysisStateLabel(item.state), statusKind(item.state)));
-    job.appendChild(element(document, "p", "analysis-job-mode", item.mode || "分析任务"));
-    job.appendChild(element(document, "p", "analysis-cadence", `周期 ${analysisCadenceLabel(item.cadence)}`));
-    job.appendChild(element(document, "p", "analysis-window", analysisWindowLabel(item)));
-    job.appendChild(
-      element(document, "p", "analysis-job-meta", `尝试 ${formatValue(item.attempt)}/${formatValue(item.maximumAttempts)}`)
-    );
-    if (item.state === "retry_wait" && item.nextAttemptAt) {
-      job.appendChild(element(document, "p", "analysis-job-meta", `下次重试 ${formatDate(item.nextAttemptAt)}`));
-    }
-    job.appendChild(element(document, "time", "record-time", formatDate(item.updatedAt)));
-    jobList.appendChild(job);
+  page.content.className += " briefing-page";
+  const toolbar = element(document, "div", "briefing-toolbar");
+  const tabs = element(document, "div", "readonly-tabs");
+  tabs.setAttribute("role", "group");
+  tabs.setAttribute("aria-label", "总结周期");
+  const buttons = [];
+  for (const cadence of cadences) {
+    const button = element(document, "button", "readonly-tab", analysisCadenceLabel(cadence));
+    button.type = "button";
+    button.addEventListener("click", () => {
+      viewState.cadence = cadence;
+      viewState.jobId = null;
+      draw();
+    });
+    buttons.push({button, cadence});
+    tabs.appendChild(button);
   }
-  jobs.appendChild(jobList);
-  split.appendChild(jobs);
+  toolbar.appendChild(tabs);
+  const dateLabel = element(document, "label", "briefing-history", "日期（北京时间）");
+  dateLabel.setAttribute("for", "briefing-date");
+  const datePicker = element(document, "input", "briefing-select briefing-date");
+  datePicker.type = "date";
+  datePicker.setAttribute("id", "briefing-date");
+  datePicker.min = rangeAvailable ? range.minDate : "";
+  datePicker.max = rangeAvailable ? range.maxDate : "";
+  datePicker.disabled = !rangeAvailable;
+  datePicker.addEventListener("change", () => {
+    viewState.date = datePicker.value;
+    viewState.jobId = null;
+    draw();
+  });
+  dateLabel.appendChild(datePicker);
+  const allDates = element(document, "button", "readonly-tab", "近 3 天");
+  allDates.type = "button";
+  allDates.addEventListener("click", () => {viewState.date = ""; viewState.jobId = null; draw();});
+  dateLabel.appendChild(allDates);
+  toolbar.appendChild(dateLabel);
+  const label = element(document, "label", "briefing-history", "报告时间");
+  label.setAttribute("for", "briefing-history");
+  const history = element(document, "select", "briefing-select");
+  history.setAttribute("id", "briefing-history");
+  history.addEventListener("change", () => {
+    viewState.jobId = history.value || null;
+    draw();
+  });
+  label.appendChild(history);
+  toolbar.appendChild(label);
+  page.content.appendChild(toolbar);
+  const host = element(document, "div", "briefing-body");
+  page.content.appendChild(host);
 
-  const details = section(document, "分析结果", "摘要、主题、发现与来源引用");
-  for (const item of collection) {
-    if (!item.summary && !Array.isArray(item.topics) && !Array.isArray(item.findings)) {
-      continue;
+  function draw() {
+    host.replaceChildren();
+    history.replaceChildren();
+    page.content.scrollTop = 0;
+    if (viewState.date && (!rangeAvailable || viewState.date < range.minDate || viewState.date > range.maxDate)) {
+      viewState.date = "";
+      viewState.jobId = null;
+    }
+    datePicker.value = viewState.date || "";
+    allDates.setAttribute("aria-pressed", String(!viewState.date));
+    allDates.disabled = !rangeAvailable;
+    for (const {button, cadence} of buttons) {
+      button.className = `readonly-tab${viewState.cadence === cadence ? " active" : ""}`;
+      button.setAttribute("aria-pressed", String(viewState.cadence === cadence));
+    }
+    const period = collection.filter(item => cadenceOf(item) === viewState.cadence && (
+      !viewState.date || analysisEndDate(item) === viewState.date
+    ));
+    const latestReport = period.find(hasReport) || period[0];
+    const selected = period.find(item => keyOf(item) === viewState.jobId);
+    if (!selected) viewState.jobId = null;
+    const item = selected || latestReport;
+    const automatic = element(document, "option", "", "最新报告（自动更新）");
+    automatic.value = "";
+    history.appendChild(automatic);
+    for (const record of period) {
+      const option = element(document, "option", "", `${analysisWindowLabel(record)} · ${analysisStateLabel(record.state)}`);
+      option.value = keyOf(record);
+      history.appendChild(option);
+    }
+    history.value = viewState.jobId || "";
+    history.disabled = !period.length;
+    if (!item) {
+      host.appendChild(EmptyState(document, `暂无${viewState.date ? ` ${viewState.date}` : ""} ${analysisCadenceLabel(viewState.cadence)}报告`));
+      return;
+    }
+    if (period[0] !== item && period[0].state !== "succeeded") {
+      host.appendChild(element(document, "p", "briefing-notice",
+        `最新周期：${analysisWindowLabel(period[0])} · ${analysisStateLabel(period[0].state)}。下方为此前报告，请留意时间。`));
     }
     const result = element(document, "article", "analysis-result");
-    result.appendChild(element(document, "h3", "record-title", `${analysisCadenceLabel(item.cadence)}总结`));
-    result.appendChild(element(document, "p", "analysis-window", analysisWindowLabel(item)));
-    if (item.summary) {
-      result.appendChild(element(document, "p", "record-body", item.summary));
-    }
-    for (const topic of Array.isArray(item.topics) ? item.topics : []) {
-      const safeTopic = object(topic);
-      const topicCard = element(document, "section", "topic-card");
-      topicCard.appendChild(element(document, "h4", "topic-title", safeTopic.title || "主题"));
-      if (safeTopic.summary) {
-        topicCard.appendChild(element(document, "p", "record-body", safeTopic.summary));
-      }
-      const sources = analysisSourceIDs(safeTopic);
-      if (sources.length) {
-        topicCard.appendChild(
-          element(document, "p", "source-reference", `来源 ${sources.join(" · ")}`)
-        );
-      }
-      result.appendChild(topicCard);
-    }
-    if (Array.isArray(item.findings) && item.findings.length) {
-      result.appendChild(JsonFindingList(document, item.findings));
-    }
-    const summarySources = stringList(item.summarySourceMessageIDs).length
-      ? stringList(item.summarySourceMessageIDs)
-      : stringList(item.sourceReferences);
-    if (summarySources.length) {
-      result.appendChild(
-        element(document, "p", "source-reference", `总结来源 ${summarySources.join(" · ")}`)
-      );
-    }
-    const caCards = CrossCACards(document, item);
-    if (caCards) result.appendChild(caCards);
-    const addresses = !caCards && Array.isArray(item.cryptoAddresses) ? item.cryptoAddresses : [];
-    if (addresses.length) {
-      const addressList = element(document, "ul", "analysis-ca-list");
-      for (const rawAddress of addresses) {
-        const address = object(rawAddress);
-        if (typeof address.address !== "string" || !address.address) {
-          continue;
+    const heading = element(document, "header", "briefing-report-header");
+    const meta = element(document, "div", "briefing-meta");
+    meta.appendChild(element(document, "span", "", viewState.jobId ? "历史报告" : "最新可读报告"));
+    meta.appendChild(StatusPill(document, analysisStateLabel(item.state), statusKind(item.state)));
+    heading.appendChild(meta);
+    heading.appendChild(element(document, "h2", "record-title", `${analysisCadenceLabel(viewState.cadence)}群聊简报`));
+    heading.appendChild(element(document, "p", "analysis-window", analysisWindowLabel(item)));
+    result.appendChild(heading);
+    host.appendChild(result);
+    if (!hasReport(item)) {
+      result.appendChild(EmptyState(document, "该周期尚无总结正文，任务状态如上；这里不会自动补跑。"));
+    } else if (object(item.briefing).version === 2) {
+      result.appendChild(StructuredBriefing(document, item, api));
+    } else {
+      result.appendChild(element(document, "p", "briefing-note", "旧模板报告，保留原内容；新规则从后续生成的报告生效，不重跑历史。"));
+      const overview = section(document, "本期速览");
+      overview.className += " briefing-overview";
+      overview.appendChild(element(document, "p", "briefing-summary", item.summary || "本份报告没有总述，可查看下方话题与观点。"));
+      const summarySources = ReportSources(document, item,
+        stringList(item.summarySourceMessageIDs).length ? item.summarySourceMessageIDs : item.sourceReferences, "summary");
+      if (summarySources) overview.appendChild(summarySources);
+      result.appendChild(overview);
+      const topics = Array.isArray(item.topics) ? item.topics : [];
+      const findings = Array.isArray(item.findings) ? item.findings : [];
+      const isRisk = finding => ["risk", "disagreement", "open_question"].includes(object(finding).category);
+      const extras = findings.filter(finding => !isRisk(finding));
+      const risks = findings.filter(isRisk);
+      if (topics.length || extras.length) {
+        const panel = section(document, "重点话题", "点击话题展开详情与原文。");
+        for (const [index, topic] of topics.entries()) {
+          const safeTopic = object(topic);
+          const topicCard = element(document, "details", "briefing-topic");
+          topicCard.setAttribute("data-disclosure-key", `${keyOf(item)}/topic/${index}`);
+          topicCard.appendChild(element(document, "summary", "", safeTopic.title || "未命名话题"));
+          if (safeTopic.summary) {
+            topicCard.appendChild(element(document, "p", "record-body", safeTopic.summary));
+          }
+          const sources = ReportSources(document, item, analysisSourceIDs(safeTopic), `topic-sources/${index}`);
+          if (sources) topicCard.appendChild(sources);
+          panel.appendChild(topicCard);
         }
-        const row = element(document, "li", "analysis-ca-item");
-        row.appendChild(element(document, "span", "rule-tag", "CA"));
-        row.appendChild(element(document, "code", "address-value", address.address));
-        if (typeof address.contextSummary === "string" && address.contextSummary) {
-          row.appendChild(element(document, "span", "analysis-ca-context", address.contextSummary));
+        if (extras.length) {
+          const extra = element(document, "details", "briefing-topic");
+          extra.setAttribute("data-disclosure-key", `${keyOf(item)}/extra-findings`);
+          extra.appendChild(element(document, "summary", "", `补充观点（${extras.length} 条）`));
+          extra.appendChild(JsonFindingList(document, extras, item, "extras"));
+          panel.appendChild(extra);
         }
-        const sources = analysisSourceIDs(address);
-        if (sources.length) {
-          row.appendChild(element(document, "span", "source-reference", `来源 ${sources.join(" · ")}`));
-        }
-        addressList.appendChild(row);
+        result.appendChild(panel);
       }
-      if (addressList.children.length) {
-        result.appendChild(addressList);
+      if (risks.length) {
+        const riskPanel = section(document, "风险与分歧", "以下是群内陈述或推测，不代表已经证实。");
+        riskPanel.className += " briefing-risks";
+        riskPanel.appendChild(JsonFindingList(document, risks, item, "risks"));
+        result.appendChild(riskPanel);
       }
+      const caCards = CrossCACards(document, item, api);
+      if (caCards) result.appendChild(caCards);
+      const sourceList = ReportSources(document, item,
+        (item.sourceMessages || []).map(message => message.eventId), "all-sources", "查看报告全部可用原文");
+      if (sourceList) result.appendChild(sourceList);
     }
-    const sourceList = AnalysisSourceList(document, item.sourceMessages, item.jobId);
-    if (sourceList) {
-      const disclosure = element(document, "details", "relay-provenance");
-      disclosure.setAttribute("data-disclosure-key", `report/${item.jobId}`);
-      disclosure.appendChild(element(document, "summary", "", "查看报告来源"));
-      disclosure.appendChild(sourceList);
-      result.appendChild(disclosure);
+    const task = element(document, "details", "briefing-task");
+    task.setAttribute("data-disclosure-key", `${keyOf(item)}/task`);
+    task.appendChild(element(document, "summary", "", "任务信息"));
+    task.appendChild(element(document, "p", "briefing-note", `尝试 ${formatValue(item.attempt)}/${formatValue(item.maximumAttempts)} · ${analysisStateLabel(item.state)}`));
+    if (item.state === "retry_wait" && item.nextAttemptAt) {
+      task.appendChild(element(document, "p", "briefing-note", `下次重试 ${formatDate(item.nextAttemptAt)}`));
     }
-    details.appendChild(result);
+    result.appendChild(task);
+    host.appendChild(element(document, "p", "briefing-note", rangeAvailable
+      ? `可查 ${range.minDate} 至 ${range.maxDate}，按北京时间的报告周期结束日期归类。更早记录仍保存在本机，未删除。`
+      : "日期范围暂不可用，请刷新页面；历史记录仍保存在本机。"));
   }
-  split.appendChild(details);
-  page.content.appendChild(split);
+  draw();
   return cleanup;
 }
 

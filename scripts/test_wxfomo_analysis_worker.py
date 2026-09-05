@@ -48,6 +48,16 @@ class FakeMiniMaxClient(object):
                 "topics": [],
                 "findings": [],
                 "cryptoAddresses": [],
+                "briefing": {
+                    "version": 2, "kind": "market",
+                    "quick_read": {
+                        "focus": {"text": "safe summary", "source_message_ids": [messages[0]['eventId']]},
+                        "news": {"text": "未提供", "source_message_ids": []},
+                        "risk": {"text": "未提供", "source_message_ids": []},
+                    },
+                    "projects": [], "events": [], "gaps": [],
+                    "business": {"progress": [], "notices": [], "blockers": [], "tasks": []},
+                },
             },
             "MiniMax-M2.7",
             "provider-request-1",
@@ -109,6 +119,17 @@ class RecordingSource(object):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_new_job_never_persists_a_legacy_provider_result(self):
+        class LegacyClient(FakeMiniMaxClient):
+            def analyze_window(self, *args):
+                outcome = super().analyze_window(*args)
+                outcome.result.pop('briefing', None)
+                return outcome
+        tick = self.worker(client=LegacyClient(), logger=mock.Mock()).run_once()
+        self.assertEqual(tick.jobs_completed, 0)
+        self.assertEqual(self.store.connection.execute('SELECT COUNT(*) FROM analysis_results').fetchone()[0], 0)
+        self.assertEqual(self.store.connection.execute("SELECT error_code FROM analysis_jobs WHERE state='failed'").fetchone()[0], 'invalid_response')
+
     def test_retry_wait_starts_after_slow_provider_failure(self):
         clock = self.clock_value
         class SlowFailure:

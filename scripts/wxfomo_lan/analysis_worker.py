@@ -11,6 +11,7 @@ from .credentials import CredentialError, load_credential
 from .minimax import MiniMaxClient, MiniMaxError
 from .rules import RULE_CATALOG_VERSION, evaluate_message
 from .scheduler import latest_due_windows
+from .briefing import BriefingError, validate_briefing
 
 
 RULE_BATCH_SIZE = 200
@@ -192,6 +193,12 @@ class AnalysisWorker(object):
                 outcome = client.analyze_window(
                     messages, job["cadence"], job["window_start"], job["window_end"]
                 )
+                # Legacy decoding remains available to old readers, but a newly
+                # completed job must never silently fall back to that template.
+                try:
+                    validate_briefing(outcome.result.get('briefing'), frozenset(job['source_event_ids']))
+                except BriefingError:
+                    raise MiniMaxError('invalid_response', False, None)
                 lease.check()
         except MiniMaxError as error:
             return self._failure(job, error, credential.revision, timestamp)

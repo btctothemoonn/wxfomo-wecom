@@ -1,3 +1,4 @@
+import datetime
 import http.client
 import importlib.util
 import io
@@ -58,7 +59,24 @@ def load_cli_module():
 
 
 class LanServerTests(unittest.TestCase):
-    def test_analysis_list_is_recent_thirty_without_deleting_history(self):
+    def test_scope_uses_frozen_input_and_local_references_not_visible_sample_count(self):
+        path = os.path.join(self.temporary_directory.name, 'scope-analysis.sqlite3')
+        self.create_analysis_fixture(path)
+        with sqlite3.connect(path) as connection:
+            connection.execute('UPDATE analysis_jobs SET source_event_ids_json=?',
+                               (json.dumps(['event-a', 'missing', 'event-c']),))
+        report = AnalysisRepository(path).analyses(MessageRepository(self.message_database, self.group_config_path))['items'][0]
+        scope = report.get('scope', {})
+        self.assertEqual(scope.get('analyzedCount'), 3)
+        self.assertEqual(scope['readableCount'], 2)
+        self.assertEqual(scope['missingCount'], 1)
+        self.assertEqual(scope['timeZone'], 'Asia/Shanghai')
+        self.assertFalse(scope['completeChatHistory'])
+        self.assertFalse(scope['externalVerification'])
+        self.assertEqual({m['eventId']: m['referenceId'] for m in report['sourceMessages']},
+                         {'event-a': 'M0001', 'event-c': 'M0003'})
+
+    def test_analysis_list_covers_three_shanghai_dates_without_deleting_history(self):
         path = os.path.join(self.temporary_directory.name, 'bounded-analysis.sqlite3')
         self.create_analysis_fixture(path)
         with sqlite3.connect(path) as connection:
@@ -68,10 +86,36 @@ class LanServerTests(unittest.TestCase):
                     "window_end, state, source_event_ids_json, attempt, maximum_attempts, "
                     "next_attempt_at, error_code, credential_file_revision, created_at, updated_at "
                     "FROM analysis_jobs WHERE job_id='job-analysis-1'", ('copy-{}'.format(index),))
-        payload = AnalysisRepository(path).analyses(MessageRepository(self.message_database, self.group_config_path))
-        self.assertEqual(len(payload['items']), 30)
+            for job_id, end in (
+                ('too-old', '2024-08-31T15:59:59+00:00'),
+                ('oldest-included', '2024-08-31T16:00:00+00:00'),
+                ('tomorrow', '2024-09-03T16:00:00+00:00'),
+            ):
+                connection.execute(
+                    "INSERT INTO analysis_jobs SELECT ?, cadence, window_start, ?, "
+                    "state, source_event_ids_json, attempt, maximum_attempts, "
+                    "next_attempt_at, error_code, credential_file_revision, created_at, updated_at "
+                    "FROM analysis_jobs WHERE job_id='job-analysis-1'",
+                    (job_id, datetime.datetime.fromisoformat(end).timestamp()))
+            original_result = connection.execute('SELECT result_json FROM analysis_results').fetchone()[0]
+        repository = AnalysisRepository(path)
+        messages = MessageRepository(self.message_database, self.group_config_path)
+        payload = repository.analyses(messages)
+        self.assertEqual(len(payload['items']), 37, 'three days must not be truncated at 30 jobs')
+        self.assertIn('oldest-included', {item['jobId'] for item in payload['items']})
+        self.assertNotIn('too-old', {item['jobId'] for item in payload['items']})
+        self.assertNotIn('tomorrow', {item['jobId'] for item in payload['items']})
+        self.assertEqual(payload['dateRange'], {'minDate': '2024-09-01', 'maxDate': '2024-09-03',
+                                              'timeZone': 'Asia/Shanghai', 'dateBasis': 'windowEnd'})
+        self.analysis_now.return_value = datetime.datetime.fromisoformat('2024-09-03T16:00:00+00:00').timestamp()
+        next_day = repository.analyses(messages)
+        self.assertEqual(next_day['dateRange']['minDate'], '2024-09-02')
+        self.assertEqual(next_day['dateRange']['maxDate'], '2024-09-04')
+        self.assertNotIn('oldest-included', {item['jobId'] for item in next_day['items']})
+        self.assertIn('tomorrow', {item['jobId'] for item in next_day['items']})
         with sqlite3.connect(path) as connection:
-            self.assertEqual(connection.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0], 36)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0], 39)
+            self.assertEqual(connection.execute('SELECT result_json FROM analysis_results').fetchone()[0], original_result)
 
     def test_ca_cards_use_full_frozen_scope_and_keep_sources(self):
         path = os.path.join(self.temporary_directory.name, 'analysis-ca.sqlite3')
@@ -106,6 +150,10 @@ class LanServerTests(unittest.TestCase):
         self.assertNotIn('configuration', diagnostics.get('sources', {}))
 
     def setUp(self):
+        # Freeze only the analysis read-window clock; listener liveness uses real time.
+        analysis_clock = mock.patch('scripts.wxfomo_lan.analysis.current_time', return_value=1725364800, create=True)
+        self.analysis_now = analysis_clock.start()
+        self.addCleanup(analysis_clock.stop)
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.token_path = os.path.join(self.temporary_directory.name, "private", "token")
