@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from collections import namedtuple
 
-from .briefing import SYSTEM_PROMPT, BriefingError, references as briefing_references, result_projection, validate_briefing
+from .briefing import SYSTEM_PROMPT, BriefingError, references as briefing_references, result_projection, validate_briefing, normalize_missing_text, compact_provider_projects
 
 
 MAINLAND_BASE_URL = "https://api.minimaxi.com/anthropic"
@@ -33,7 +33,10 @@ _MAX_TEXT_BYTES = 64 * 1024
 # the fixed prompt/document envelope inside MAX_REQUEST_BYTES.
 _MAX_PROJECTED_RESULT_BYTES = 32 * 1024
 _SYNTHESIS_BATCH_SIZE = 8
-_TIMEOUT_SECONDS = 90.0
+_MESSAGE_BATCH_SIZE = 300
+# Large, non-streaming briefings can exceed 90 seconds before any response header.
+# Keep a finite wait; this does not increase the existing bounded repair/retries.
+_TIMEOUT_SECONDS = 180.0
 
 _TOP_LEVEL_KEYS = frozenset(
     ("summary", "summary_source_message_ids", "topics", "findings", "crypto_addresses")
@@ -76,7 +79,9 @@ _SOLANA_CUE = re.compile(
     r"birdeye\.so|solscan\.io|pump\.fun)"
 )
 
-_SYSTEM_PROMPT = SYSTEM_PROMPT
+_SYSTEM_PROMPT = SYSTEM_PROMPT + '''
+crypto_address_evidence 区分地址原文与附近讨论：每项 address 是原样地址，direct_source_message_ids 是实际出现该大小写地址的消息；context_source_message_ids 仅表示附近讨论，不能单独用作 CA 出现的证据。输出 addresses 时必须逐字选择对应 address，并引用该项至少一个 direct_source_message_ids；不得把其他大小写变体或其他 CA 的引用混用。没有直接来源时，不要给该项目填入未经支持的 CA。
+'''
 
 
 class _RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -94,12 +99,13 @@ def _default_transport(request, timeout):
 class MiniMaxError(Exception):
     """A redacted provider failure represented only by stable scheduling data."""
 
-    __slots__ = ("code", "retryable", "retry_after")
+    __slots__ = ("code", "retryable", "retry_after", "validation_detail")
 
-    def __init__(self, code, retryable=False, retry_after=None):
+    def __init__(self, code, retryable=False, retry_after=None, validation_detail=None):
         self.code = code
         self.retryable = bool(retryable)
         self.retry_after = retry_after
+        self.validation_detail = validation_detail
         super().__init__(code)
 
     def __repr__(self):
@@ -378,7 +384,7 @@ def _unique_json_object(pairs):
     return result
 
 
-def _strict_json(text):
+def _strict_json(text, allow_missing_wrapper=False):
     stripped = text.strip()
     if stripped.startswith("```"):
         lines = stripped.splitlines()
@@ -395,9 +401,24 @@ def _strict_json(text):
             parse_constant=lambda unused: (_ for _ in ()).throw(ValueError()),
             object_pairs_hook=_unique_json_object,
         )
-    except (RecursionError, TypeError, ValueError):
+    except (RecursionError, TypeError, ValueError) as error:
         parse_failed = True
         value = None
+        # Some end_turn responses contain a complete briefing object but omit
+        # only its outer wrapper's final brace. Decode that WHOLE inner object;
+        # never complete strings, numbers, arrays, citations or missing fields.
+        if allow_missing_wrapper and isinstance(error, json.JSONDecodeError) and error.pos == len(stripped):
+            prefix = re.match(r'^\{\s*"briefing"\s*:\s*', stripped)
+            if prefix:
+                try:
+                    inner, end = json.JSONDecoder(
+                        parse_constant=lambda unused: (_ for _ in ()).throw(ValueError()),
+                        object_pairs_hook=_unique_json_object,
+                    ).raw_decode(stripped, prefix.end())
+                    if isinstance(inner, dict) and end == len(stripped):
+                        value, parse_failed = {'briefing': inner}, False
+                except (RecursionError, TypeError, ValueError):
+                    pass
     if parse_failed:
         raise MiniMaxError("invalid_response", False, None)
     return value
@@ -440,9 +461,36 @@ def _exact_object(value, keys):
 def _validated_result(value, known_ids, evidence, maximum_result_bytes):
     if isinstance(value, dict) and set(value) == {"briefing"}:
         try:
-            result = result_projection(validate_briefing(value['briefing'], known_ids, evidence))
+            briefing = normalize_missing_text(value['briefing'])
+            # Citation count is a display bound, not a reason to regenerate
+            # conclusions. Check EVERY ID before reducing; unknown tail IDs
+            # must not disappear through truncation. Keep a direct CA citation
+            # already supplied by the model; never invent a new citation.
+            pending = [briefing]
+            while pending:
+                item = pending.pop()
+                if isinstance(item, dict):
+                    ids = item.get('source_message_ids')
+                    if isinstance(ids, list) and len(ids) > 5:
+                        if any(not isinstance(ref, str) or ref not in known_ids for ref in ids):
+                            raise MiniMaxError('invalid_source_reference', False, None)
+                        unique = list(dict.fromkeys(ids))
+                        selected = unique[:5]
+                        raw = item.get('address')
+                        if isinstance(raw, str):
+                            key = raw.lower() if raw.lower().startswith('0x') else raw
+                            direct = evidence.get(key, {}).get('verbatim_sources', {}).get(raw, [])
+                            if not set(selected).intersection(direct):
+                                existing = next((ref for ref in unique if ref in direct), None)
+                                if existing is not None:
+                                    selected = selected[:4] + [existing]
+                        item['source_message_ids'] = selected
+                    pending.extend(item.values())
+                elif isinstance(item, list):
+                    pending.extend(item)
+            result = result_projection(compact_provider_projects(briefing, known_ids, evidence))
         except BriefingError as error:
-            raise MiniMaxError(error.code, False, None)
+            raise MiniMaxError(error.code, False, None, validation_detail=error.detail)
         if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > maximum_result_bytes:
             raise MiniMaxError('invalid_response', False, None)
         return result
@@ -813,7 +861,7 @@ class MiniMaxClient(object):
                 raise response_failure
             validation_failure = None
             try:
-                model_value = _strict_json(model_text)
+                model_value = _strict_json(model_text, allow_missing_wrapper=envelope.get('stop_reason') == 'end_turn')
             except MiniMaxError as error:
                 validation_failure = MiniMaxError(error.code, False, None)
             if validation_failure is None:
@@ -821,12 +869,21 @@ class MiniMaxClient(object):
                 # guard must terminate, not enter the format-repair path.
                 self._guard_provider_value(model_value)
                 try:
+                    # Stable JSON mode shares the bounded format repair, but
+                    # never accepts fences or the legacy result envelope.
+                    if envelope.get('stop_reason') == 'json_complete' and (
+                        not model_text.lstrip().startswith('{')
+                        or not isinstance(model_value, dict)
+                        or set(model_value) != {'briefing'}
+                    ):
+                        raise MiniMaxError('invalid_response', False, None)
                     result = _validated_result(
                         model_value, known_ids, evidence,
                         self.maximum_projected_result_bytes,
                     )
                 except MiniMaxError as error:
-                    validation_failure = MiniMaxError(error.code, False, None)
+                    validation_failure = MiniMaxError(error.code, False, None,
+                                                      validation_detail=error.validation_detail)
             if validation_failure is None:
                 self._guard_provider_value(result)
                 return AnalysisOutcome(
@@ -841,6 +898,8 @@ class MiniMaxClient(object):
             ):
                 raise original_failure
             current_document = dict(document, validation_feedback=validation_failure.code)
+            if validation_failure.validation_detail is not None:
+                current_document['validation_detail'] = validation_failure.validation_detail
             if not self._request_fits(current_document):
                 raise original_failure
 
@@ -879,13 +938,15 @@ class MiniMaxClient(object):
 
     @staticmethod
     def _evidence_document(evidence):
-        return [
-            {
-                "address": item["address"],
-                "context_source_message_ids": item["source_message_ids"],
-            }
-            for item in evidence.values()
-        ]
+        result = []
+        for item in evidence.values():
+            variants = [(raw, ids) for raw, ids in item.get('verbatim_sources', {}).items() if ids]
+            # Context-only legacy evidence stays explicit. Each spelling is sent
+            # once, so address-heavy inputs still fit the bounded request budget.
+            for raw, direct_ids in variants or [(item['address'], [])]:
+                result.append(dict(address=raw, direct_source_message_ids=direct_ids,
+                                   context_source_message_ids=item['source_message_ids']))
+        return result
 
     @staticmethod
     def _result_source_ids(result):
@@ -1022,6 +1083,7 @@ class MiniMaxClient(object):
             if (
                 current_content_bytes + max(1, item_content_bytes)
                 <= self.chunk_content_bytes
+                and len(candidate) <= _MESSAGE_BATCH_SIZE
                 and self._request_fits(document)
             ):
                 current = candidate
@@ -1067,6 +1129,25 @@ class MiniMaxClient(object):
         values = list(values)
         return None if any(value is None for value in values) else sum(values)
 
+    def _restore_capture_ids(self, outcome, mapping):
+        if not mapping:
+            return outcome
+        def restore(value):
+            if isinstance(value, list):
+                return [restore(item) for item in value]
+            if isinstance(value, dict):
+                result = {}
+                for key, child in value.items():
+                    if key in ('source_message_ids', 'sourceMessageIDs', 'summarySourceMessageIDs'):
+                        if any(item not in mapping for item in child):
+                            raise MiniMaxError('invalid_source_reference', False, None)
+                        result[key] = [mapping[item] for item in child]
+                    else:
+                        result[key] = restore(child)
+                return result
+            return value
+        return outcome._replace(result=self._guard_provider_value(restore(outcome.result)))
+
     def analyze_window(self, messages, cadence=None, window_start=None, window_end=None):
         default_window = cadence is None and window_start is None and window_end is None
         if default_window:
@@ -1091,6 +1172,15 @@ class MiniMaxClient(object):
         event_ids = [item["eventId"] for item in projected]
         if len(set(event_ids)) != len(event_ids):
             raise MiniMaxError("request_invalid", False, None)
+        # Long capture hashes are expensive and error-prone to reproduce. A
+        # window-local bijection keeps every source while shortening only IDs.
+        # Already-short caller IDs remain supported; persisted IDs never change.
+        capture_ids = {}
+        if any(len(event_id) > 12 for event_id in event_ids):
+            for index, item in enumerate(projected, 1):
+                alias = 'M{:04d}'.format(index)
+                capture_ids[alias] = item['eventId']
+                item['eventId'] = alias
         evidence = _address_evidence(projected)
         work = []
         usage = []
@@ -1106,7 +1196,7 @@ class MiniMaxClient(object):
             usage.append((outcome.input_tokens, outcome.output_tokens))
 
         if len(work) == 1:
-            return work[0]["outcome"]
+            return self._restore_capture_ids(work[0]["outcome"], capture_ids)
         while len(work) > 1:
             batches = []
             current = []
@@ -1140,10 +1230,10 @@ class MiniMaxClient(object):
                 merged.append(self._work_item(outcome))
                 usage.append((outcome.input_tokens, outcome.output_tokens))
             work = merged
-        return work[0]["outcome"]._replace(
+        return self._restore_capture_ids(work[0]["outcome"]._replace(
             input_tokens=self._usage_total(row[0] for row in usage),
             output_tokens=self._usage_total(row[1] for row in usage),
-        )
+        ), capture_ids)
 
     def test_connection(self):
         envelope, request_id, unused_input, unused_output = self._post(

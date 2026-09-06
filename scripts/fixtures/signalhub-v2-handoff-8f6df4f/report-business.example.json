@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 2,
+  "type": "report",
+  "report": {
+    "id": "wecom:fixture-device:00000000-0000-4000-8000-000000000001:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    "revision": 2,
+    "cadence": "six_hour",
+    "windowStart": "2026-09-06T00:00:00.000Z",
+    "windowEnd": "2026-09-06T06:00:00.000Z",
+    "generatedAt": "2026-09-06T06:10:00.000Z",
+    "summary": "合成业务群的小林汇总演示验收进度。\n小林自述下一步核对清单，未提供期限。\n缺少最终验收结论，不能写成已交付。",
+    "model": "fixture-model",
+    "sourceCount": 1,
+    "sourceComplete": true,
+    "sourcesTruncated": true,
+    "topics": [],
+    "findings": [],
+    "sources": [],
+    "briefing": {
+      "version": 2,
+      "kind": "business",
+      "quick_read": {
+        "focus": {
+          "text": "合成业务群的小林汇总演示验收进度。",
+          "source_message_ids": [
+            "M0001"
+          ]
+        },
+        "news": {
+          "text": "小林自述下一步核对清单，未提供期限。",
+          "source_message_ids": [
+            "M0001"
+          ]
+        },
+        "risk": {
+          "text": "缺少最终验收结论，不能写成已交付。",
+          "source_message_ids": [
+            "M0001"
+          ]
+        }
+      },
+      "projects": [],
+      "events": [],
+      "gaps": [
+        {
+          "text": "合成记录未提供完成日期。",
+          "source_message_ids": [
+            "M0001"
+          ]
+        }
+      ],
+      "business": {
+        "progress": [
+          {
+            "text": "小林自述已整理演示验收清单。",
+            "source_message_ids": [
+              "M0001"
+            ]
+          }
+        ],
+        "notices": [
+          {
+            "text": "小林说明清单仍待核对。",
+            "source_message_ids": [
+              "M0001"
+            ]
+          }
+        ],
+        "blockers": [
+          {
+            "text": "尚未提供最终验收结论。",
+            "source_message_ids": [
+              "M0001"
+            ]
+          }
+        ],
+        "tasks": [
+          {
+            "text": "核对演示清单，仅为合成待办。",
+            "owner": "小林（合成昵称）",
+            "deadline": "未提供",
+            "source_message_ids": [
+              "M0001"
+            ]
+          }
+        ]
+      }
+    },
+    "scope": {
+      "groupNames": [
+        "合成业务群"
+      ],
+      "timeZone": "Asia/Shanghai",
+      "timeBasis": "notification_observed_at",
+      "dataCutoff": "2026-09-06T01:00:00.000Z",
+      "frozenCount": 1,
+      "analyzedCount": 1,
+      "readableCount": 1,
+      "missingCount": 0,
+      "unknownTimeCount": 0,
+      "completeChatHistory": false,
+      "externalVerification": false
+    },
+    "sourceReferences": [
+      {
+        "id": "M0001",
+        "group": "合成业务群",
+        "sender": "小林（合成昵称）",
+        "observedAt": "2026-09-06T01:00:00.000Z",
+        "available": true
+      }
+    ],
+    "caDiscussions": [],
+    "caCoverage": {
+      "sourcesComplete": true,
+      "totalItems": 0,
+      "exportedItems": 0,
+      "truncated": false
+    }
+  }
+}

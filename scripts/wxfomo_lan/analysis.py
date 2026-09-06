@@ -661,23 +661,30 @@ class AnalysisRepository(object):
                 "aiConfigured": False,
                 "providerNames": [],
                 "protocol": "anthropic_compatible",
-                "model": "MiniMax-M2.7",
+                "model": None,
             }
         credential_status = rows[0]["credential_status"]
         if credential_status not in ("configured", "unconfigured", "unsafe", None):
             return {
                 "available": False, "reason": "schema_incompatible",
                 "aiConfigured": False, "providerNames": [],
-                "protocol": "anthropic_compatible", "model": "MiniMax-M2.7",
+                "protocol": None, "model": None,
             }
+        model_reason, model_rows = self._rows(
+            {'analysis_results': {'model', 'analysis_id'}},
+            'SELECT model FROM analysis_results ORDER BY analysis_id DESC LIMIT 1',
+        )
+        model = model_rows[0]['model'] if not model_reason and model_rows else None
+        if model not in ('MiniMax-M2.7', 'deepseek-v4-flash'):
+            model = None
         return {
             "available": True,
             "reason": None,
             "aiConfigured": credential_status == "configured",
-            "providerNames": ["MiniMax-M2.7"]
-            if credential_status == "configured" else [],
-            "protocol": "anthropic_compatible",
-            "model": "MiniMax-M2.7",
+            "providerNames": [model] if credential_status == "configured" and model else [],
+            "protocol": ('openai_compatible' if model == 'deepseek-v4-flash' else 'anthropic_compatible') if model else None,
+            "model": model,
+            "modelBasis": "last_successful_report",
             "credentialStatus": credential_status or "unconfigured",
             "lastProviderSuccessAt": _timestamp(rows[0]["last_provider_success_at"]),
             "lastErrorCode": rows[0]["last_error_code"]

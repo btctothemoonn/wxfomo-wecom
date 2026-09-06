@@ -20,22 +20,37 @@ _EXPLORERS = {"etherscan.io": "ethereum", "basescan.org": "base", "bscscan.com":
 _EXPLORER_PREFIX = re.compile(r"https://([^/\s]+)/(?:address|token)/$", re.I)
 
 
-def _mentions(content):
+def address_mentions(content):
+    """Return direct CA evidence while preserving the first display spelling."""
     if not isinstance(content, str):
         return []
     seen = set()
+    result = []
     for match in _EVM_ADDRESS.finditer(content):
         prefix = content[max(0, match.start()-100):match.start()]
         explorer = _EXPLORER_PREFIX.search(prefix)
         chain = _CHAIN_PREFIX.search(prefix)
         network = (_EXPLORERS.get(explorer.group(1).lower(), "unknown") if explorer else
                    _NETWORKS[chain.group(1).lower()] if chain else "unknown")
-        seen.add((match.group(0).lower(), network))
+        address = match.group(0)
+        key = (address.lower(), network)
+        if key not in seen:
+            seen.add(key)
+            result.append(dict(address=address, normalizedAddress=key[0], network=network))
     for match in _SOLANA_ADDRESS.finditer(content):
         address = match.group(0)
         if _base58_decoded_size(address) == 32 and (content.strip() == address or _SOLANA_CUE.search(content)):
-            seen.add((address, "solana"))
-    return sorted(seen)
+            key = (address, "solana")
+            if key not in seen:
+                seen.add(key)
+                result.append(dict(address=address, normalizedAddress=address,
+                                   network="solana"))
+    return result
+
+
+def _mentions(content):
+    return sorted((item["normalizedAddress"], item["network"])
+                  for item in address_mentions(content))
 
 
 def _context_owners(messages, keys):

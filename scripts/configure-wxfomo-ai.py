@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactively configure the local MiniMax credential."""
+"""Interactively configure the selected local AI provider without key arguments."""
 
 import argparse
 import getpass
@@ -18,15 +18,23 @@ def _parser():
     parser = argparse.ArgumentParser(description="Configure local AI credentials.")
     parser.add_argument("--credentials", default=DEFAULT_CREDENTIAL_PATH, metavar="PATH")
     parser.add_argument("--test-connection", action="store_true")
+    parser.add_argument('--provider', choices=('minimax', 'deepseek'), default='minimax')
     return parser
 
 
 def main(argv=None):
     arguments = _parser().parse_args(argv)
     if arguments.test_connection:
+        model = DEFAULT_MODEL
         try:
             credential = load_credential(arguments.credentials)
-            result = MiniMaxClient(credential.api_key).test_connection()
+            if credential.provider == 'deepseek':
+                from wxfomo_lan.deepseek import DeepSeekClient
+                model = 'deepseek-v4-flash'
+                client = DeepSeekClient(credential.api_key)
+            else:
+                client = MiniMaxClient(credential.api_key)
+            result = client.test_connection()
         except FileNotFoundError:
             print("{0} 连接失败: credential_unavailable".format(DEFAULT_MODEL))
             return 1
@@ -34,7 +42,7 @@ def main(argv=None):
             print("{0} 连接失败: credential_unavailable".format(DEFAULT_MODEL))
             return 1
         except MiniMaxError as error:
-            print("{0} 连接失败: {1}".format(DEFAULT_MODEL, error.code))
+            print("{0} 连接失败: {1}".format(model, error.code))
             return 1
         request_id = result.get("providerRequestId")
         suffix = " ({0})".format(request_id) if request_id else ""
@@ -42,8 +50,9 @@ def main(argv=None):
         return 0
 
     try:
-        first = getpass.getpass("MiniMax API key: ")
-        second = getpass.getpass("Confirm MiniMax API key: ")
+        label = 'DeepSeek' if arguments.provider == 'deepseek' else 'MiniMax'
+        first = getpass.getpass(label + " API key: ")
+        second = getpass.getpass("Confirm " + label + " API key: ")
     except (EOFError, KeyboardInterrupt):
         print("Credential was not saved.")
         return 1
@@ -51,7 +60,7 @@ def main(argv=None):
         print("Credentials did not match.")
         return 1
     try:
-        save_credential(arguments.credentials, first)
+        save_credential(arguments.credentials, first, provider=arguments.provider)
     except (CredentialError, OSError):
         print("Credential was not saved.")
         return 1

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 2,
+  "type": "ca_alert",
+  "alert": {
+    "id": "wecom-ca:fixture-device:00000000-0000-4000-8000-000000000001:1",
+    "revision": 1,
+    "address": "0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb",
+      "network": "base",
+    "groups": [
+      "合成甲群",
+      "合成乙群"
+    ],
+    "groupCount": 2,
+    "mentionCount": 2,
+    "uniqueStatementCount": 1,
+    "duplicateCount": 1,
+    "firstSeenAt": "2026-09-06T00:10:00.000Z",
+    "lastSeenAt": "2026-09-06T00:30:00.000Z",
+    "triggeredAt": "2026-09-06T00:30:10.000Z",
+    "evaluatedAt": "2026-09-06T00:30:10.000Z",
+    "expiresAt": "2026-09-06T01:10:00.000Z",
+    "windowSeconds": 3600,
+    "thresholdGroups": 2,
+    "status": "active",
+    "notificationVersion": 1,
+    "catchup": false
+  }
+}

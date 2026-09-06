@@ -7,7 +7,7 @@
 - 按群名白名单读取 macOS 企业微信通知，保存在本机 SQLite，支持查阅和搜索。
 - 新消息中提取“昵称：正文”的实际发言昵称，保留机器人名称和原文；旧消息不改写。
 - 本地关键词规则、重点捕捉、告警。
-- MiniMax 大陆站 2 小时、6 小时、24 小时定时总结，保留来源引用和失败状态。
+- DeepSeek 或 MiniMax 大陆站 2 小时、6 小时、24 小时定时总结，保留来源引用和失败状态。
 - 每份报告内展示 CA 讨论：涉及群、提及数、去重发言、重复传播及最多 5 条原文示例。
 - 只读网页、密码认证、AI 配置状态和监听诊断。
 
@@ -45,9 +45,20 @@ zsh scripts/start-wxfomo-lan.sh --allow-lan
 | messages.sqlite3.relay.json | 新消息归因的固定生效边界，勿删除或重建 |
 | analysis.sqlite3 | 规则、周期任务和历史 AI 结果 |
 | access-token | 网页访问密码（保留旧文件名） |
-| ai-credentials.json | 本机 MiniMax 凭据，不上传 Git |
+| ai-credentials.json | 本机 AI 提供商选择与凭据，不上传 Git |
 
-启动会沿用已有文件。更换代码不需要清空数据库，也不要把密钥放进网页目录。MiniMax 凭据仅由后台读取，网页不显示或修改密钥。
+启动会沿用已有文件。更换代码不需要清空数据库，也不要把密钥放进网页目录。AI 凭据仅由后台读取，网页不显示或修改密钥。
+
+配置 DeepSeek（隐藏输入两次，不接受命令行密钥参数）：
+
+```sh
+python3 scripts/configure-wxfomo-ai.py --provider deepseek
+python3 scripts/configure-wxfomo-ai.py --test-connection
+```
+
+DeepSeek 使用 `deepseek-v4-flash` 非思考模式及稳定 JSON 输出接口；本地仍严格检查结构、引用和完整 CA。实测 Beta 工具输出曾有格式错误，因此不默认启用 Beta，也不自动换提供商重试。旧 MiniMax 配置兼容，切换会保留另一家的密钥，但每次任务只调用所选提供商。恢复 MiniMax 可用 `--provider minimax` 重新配置。
+
+格式兼容只处理缺失信息占位、项目未提供的数据/地址空列表和已核验引用的展示数量；不修改结论、猜测 CA 或放过未知引用。每批最多 300 条，超量分批后合并，仍覆盖完整冻结输入。配置页面所示模型来自最近成功报告，不读取密钥来推断。
 
 ## 总结与 CA 统计口径
 
@@ -67,6 +78,20 @@ zsh scripts/start-wxfomo-lan.sh --allow-lan
 - 新完成报告的用量累计本次成功分析中的分块、汇总和格式修复请求；提供方漏报的用量显示未知。此前失败尝试的消耗不包含在内，旧报告不回写。
 
 通知可能受免打扰、预览隐藏、专注模式、前台抑制和系统清理影响；采集不到的消息无法总结。图片、视频可能只有通知占位文字，不能据此还原全部聊天记录。
+
+## Signal 同步（默认关闭）
+
+Mac 侧已提供独立同步模块；原启动脚本不会启动它。网站接收接口、本人登录授权、两端合成联调和专用同步凭证就绪后，才能另行启用。当前不能把“本地代码通过测试”理解为“网站已经同步”。交接与限制见 [Signal v2 交接](docs/integrations/signalhub-v2-foundation.md)。
+
+```sh
+python3 scripts/wxfomo-signal-sync.py --help
+```
+
+入口必须明确选择 `--status`、`--dry-run`、`--initialize`、`--run` 或 `--render-launch-agent PATH`。前两项不发送数据；未初始化时返回固定错误。`--initialize --store-id UUID` 仅在正式启用时记录当下双水位，不补传历史；`--run --store-id UUID` 必须使用同一持久命名空间，不能随意更换。默认配置为数据目录下的 `signalhub-sync/config.json`（专用 url/deviceId/secret），不要复用 AI 密钥或网页密码。生成的 LaunchAgent 文件是禁用状态，程序不会安装或加载它。
+
+完整报告每 60 秒发现，独立 CA 每 10 秒检测“1 小时内至少 2 群”，提醒冷却 30 分钟。CA 不依赖 AI 完成；不明确链的 EVM 地址按群隔离。仅发送完整总结和来源元数据，`sources=[]`，不上传原始聊天。断网队列、修订、过期、静默追赶、签名确认、认证暂停及限流都使用独立同步数据库；停止它不停止监听或 AI。
+
+这些频率是 Mac 调度参数，不是网站已实现的时效承诺。超过单轮 500 条候选来源或 2 秒预算会明确报错且不把未检查消息当成功；网站页面可见时 15 秒刷新及约 60 秒可见目标仍需两端实测。
 
 ## 开发与验证
 

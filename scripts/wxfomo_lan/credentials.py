@@ -1,4 +1,4 @@
-"""Private, race-resistant storage for the local MiniMax API key."""
+"""Private, race-resistant storage for the explicitly selected AI provider."""
 
 import errno
 import json
@@ -17,7 +17,7 @@ class CredentialError(ValueError):
     """A credential path or payload failed a local safety check."""
 
 
-class Credential(namedtuple("CredentialBase", ("api_key", "revision"))):
+class Credential(namedtuple("CredentialBase", ("api_key", "revision", "provider"), defaults=('minimax',))):
     """A secret API key paired with a non-secret file metadata revision."""
 
     __slots__ = ()
@@ -152,7 +152,7 @@ def _revision(metadata):
     )
 
 
-def load_credential(path):
+def _load_document(path):
     """Load one credential only after verifying its parent and file metadata."""
 
     parent_fd, name = _safe_private_parent(path, create=False)
@@ -203,10 +203,18 @@ def load_credential(path):
         raise CredentialError("credential_payload_invalid")
     if not isinstance(decoded, dict):
         raise CredentialError("credential_payload_invalid")
-    api_key = decoded.get("miniMaxAPIKey")
+    return decoded, _revision(after)
+
+
+def load_credential(path):
+    decoded, revision = _load_document(path)
+    provider = decoded.get('provider', 'minimax')
+    if provider not in ('minimax', 'deepseek'):
+        raise CredentialError('credential_payload_invalid')
+    api_key = decoded.get('deepSeekAPIKey' if provider == 'deepseek' else 'miniMaxAPIKey')
     if not isinstance(api_key, str) or not api_key.strip():
         raise CredentialError("credential_payload_invalid")
-    return Credential(api_key.strip(), _revision(after))
+    return Credential(api_key.strip(), revision, provider)
 
 
 def _atomic_private_write(parent_fd, name, payload):
@@ -265,17 +273,24 @@ def _atomic_private_write(parent_fd, name, payload):
                 pass
 
 
-def save_credential(path, api_key):
-    """Atomically store a MiniMax API key in an owned private directory."""
+def save_credential(path, api_key, provider='minimax'):
+    """Select one provider, preserving the other key without automatic fallback."""
 
+    if provider not in ('minimax', 'deepseek'):
+        raise CredentialError('credential_provider_invalid')
     if not isinstance(api_key, str):
         raise CredentialError("credential_empty")
     value = api_key.strip()
     if not value:
         raise CredentialError("credential_empty")
-    payload = json.dumps(
-        {"miniMaxAPIKey": value}, separators=(",", ":")
-    ).encode("utf-8")
+    try:
+        previous, unused_revision = _load_document(path)
+    except FileNotFoundError:
+        previous = {}
+    document = {key: previous[key] for key in ('miniMaxAPIKey', 'deepSeekAPIKey') if key in previous}
+    document['provider'] = provider
+    document['deepSeekAPIKey' if provider == 'deepseek' else 'miniMaxAPIKey'] = value
+    payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
     parent_fd, name = _safe_private_parent(path, create=True)
     try:
         _atomic_private_write(parent_fd, name, payload)

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "type": "heartbeat",
+  "status": {
+    "listener": "online",
+    "worker": "offline",
+    "pendingReports": 1,
+    "lastError": "worker_stale",
+    "caDetector": "online",
+    "pendingAlerts": 2,
+    "lastMessageObservedAt": "2026-09-06T00:30:00.000Z",
+    "lastCaEvaluatedAt": "2026-09-06T00:50:00.000Z"
+  }
+}

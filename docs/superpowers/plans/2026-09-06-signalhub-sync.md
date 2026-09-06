@@ -25,7 +25,9 @@
 
 ## 0. 对接前置条件与分期
 
-本次只交付计划。刚核对 Signal main 的交接文档，其 blob 仍为 `d9f5de7ba2963498b03e34be1423c050a3a6a553`，与已审阅的 55dfa50 v1 相同。**在 Signal 回传 v2 接口确认前，不执行依赖该协议的实现任务，不向生产写入。** 用户已经确认产品参数，不需要再询问同一套规则。
+2026-09-06 已收到 Signal `8f6df4f9e8ed7812ba06f6b92b481ca12f5c0939` 的 v2 确认，用户随后确认继续实施。已完成指定版本离线审阅（Mac 本地 `b8c8fa6`）。市场报告样例的不同昵称去重计数存在一处矛盾：Mac 在 `scripts/fixtures/signalhub-sync/` 提供 2/0 修正候选并重签；原固定版本样例不覆盖，仍等待 Signal 合并确认。可以推进不依赖生产入口的离线代码；**不得部署或启用真实同步。** 不需要再询问既定产品参数。
+
+2026-09-06 后续实施：Task 1–6 的 Mac 代码已落地，包含持久队列、完整报告导出、独立实时 CA 和显式 opt-in 调度；整体验收结果以 `docs/integrations/signalhub-v2-foundation.md` 为准。下方未勾选的历史实施步骤不代表尚未编码，也不能自动视为逐项完全验收；特别是大候选集有界进度与两端时效仍存在明确限制。网站接收器/部署/真实同步均未启用。用户另行要求修复 AI 并提供 DeepSeek 凭据，因此本批同时处理 AI，但没有把 AI 调用混入同步服务。
 
 Signal 需确认：完整 briefing/scope/sourceReferences/caCoverage；允许身份但禁止原文；新增 ca_alert、扩展 heartbeat、CA 分页和 active 列表；15 秒可见刷新；过期、catchup、notificationVersion 和首次接收时间语义；所有读接口执行用户级授权。入口路径、HMAC、确认及错误语义沿用 v1。以上变更详见设计第 4–6 节。
 
@@ -52,8 +54,8 @@ Signal 需确认：完整 briefing/scope/sourceReferences/caCoverage；允许身
 
 **Interfaces:** `encode_payload(value: dict) -> bytes` 严格校验后返回唯一 UTF-8 字节；`validate_payload(value: dict) -> None` 失败抛 `SyncError(code)`，异常字符串仅固定错误码。后续模块只发送 encode_payload 的返回值，不重新序列化。
 
-- [ ] 按两端确认的字段准备四个完整合成 fixture，禁止从真实库复制。report 使用虚构群/昵称、来源元数据与完整 market briefing；ca_alert 使用测试地址且显式标为合成样例文件；signature 使用公开测试密钥与固定时钟。以独立 fixture 提交测试数据，不把密钥例子写进生产默认配置。
-- [ ] 先写最小失败测试，再逐个增加未知键、错误版本、sources 非空、元数据含 content、非法引用、大小写、非法 UTF-16、真假布尔与整数、超限等测试：
+- [x] 按两端确认的字段准备四个完整合成 fixture，禁止从真实库复制。report 使用虚构群/昵称、来源元数据与完整 market briefing；ca_alert 使用测试地址且显式标为合成样例文件；signature 使用公开测试密钥与固定时钟。以独立 fixture 提交测试数据，不把密钥例子写进生产默认配置。
+- [x] 先写最小失败测试，再逐个增加未知键、错误版本、sources 非空、元数据含 content、非法引用、大小写、非法 UTF-16、真假布尔与整数、超限等测试：
 
 ```python
 import copy
@@ -74,8 +76,8 @@ class ContractTests(unittest.TestCase):
             encode_payload(invalid)
 ```
 
-- [ ] Run `python3 -m unittest scripts.test_wxfomo_signal_contract -v`，先确认因缺少接口失败。实现严格字段校验，引用与长度规则来自设计第 4–6 节，不能只检查顶层 keys。
-- [ ] 使用下列序列化内核；validate_payload 逐层校验枚举/时间/计数恒等式/引用闭包/安全文字，错误统一变成固定 code；不要捕获后假装成功：
+- [x] Run `python3 -m unittest scripts.test_wxfomo_signal_contract -v`，先确认因缺少接口失败。实现严格字段校验，引用与长度规则来自设计第 4–6 节，不能只检查顶层 keys。
+- [x] 使用下列序列化内核；validate_payload 逐层校验枚举/时间/计数恒等式/引用闭包/安全文字，错误统一变成固定 code；不要捕获后假装成功：
 
 ```python
 def encode_payload(value):
@@ -87,7 +89,7 @@ def encode_payload(value):
     return body
 ```
 
-- [ ] 同命令验证转绿；从 fixture 递归检查未带入 content、附件和实际凭证。CA 中合法长地址不得被凭证检测误杀。提交本任务文件，提交消息 `feat: define Signal v2 payload contract`。
+- [x] 同命令验证转绿；从 fixture 递归检查未带入 content、附件和实际凭证。CA 中合法长地址不得被凭证检测误杀。提交本任务文件，提交消息 `feat: define Signal v2 payload contract`。
 
 ## Task 2：私密配置、HMAC 和发送分类
 
@@ -95,7 +97,7 @@ def encode_payload(value):
 
 **Interfaces:** `load_sync_config(path) -> SyncConfig(url, device_id, secret)`，repr 隐藏 secret；`sign_headers(body, device_id, secret, timestamp, nonce) -> dict`；`send_payload(config, body, transport=None) -> (status, headers, response_bytes)`；`classify_response(expected, status, headers, response_bytes, now) -> dict`，返回 `action`（ack/retry/pause/quarantine）、固定 `code`、`retry_after`（秒或 null）。expected 是已入队 payload 解码对象。
 
-- [ ] 写公开签名向量的失败测试：
+- [x] 写公开签名向量的失败测试：
 
 ```python
 def test_public_signature_fixture(self):
@@ -104,12 +106,13 @@ def test_public_signature_fixture(self):
     from scripts.wxfomo_lan.signal_transport import sign_headers
     path = Path("scripts/fixtures/signalhub-sync/signature.json")
     fixture = json.loads(path.read_text(encoding="utf-8"))
-    headers = sign_headers(fixture["body"].encode("utf-8"), fixture["device"],
-                           fixture["secret"], fixture["timestamp"], fixture["nonce"])
-    self.assertEqual(headers["X-Wecom-Signature"], fixture["signature"])
+    for vector in fixture["vectors"]:
+        headers = sign_headers(vector["body"].encode("utf-8"), vector["device"],
+                               fixture["secret"], vector["timestamp"], vector["nonce"])
+        self.assertEqual(headers["X-Wecom-Signature"], vector["signature"])
 ```
 
-- [ ] Run `python3 -m unittest scripts.test_wxfomo_signal_transport -v`，确认缺少模块导致失败。签名实现固定如下；生产时间与 nonce 每次尝试重新生成，body 固定：
+- [x] Run `python3 -m unittest scripts.test_wxfomo_signal_transport -v`，确认缺少模块导致失败。签名实现固定如下；生产时间与 nonce 每次尝试重新生成，body 固定：
 
 ```python
 def sign_headers(body, device_id, secret, timestamp, nonce):
@@ -123,9 +126,9 @@ def sign_headers(body, device_id, secret, timestamp, nonce):
             "X-Wecom-Signature": signature}
 ```
 
-- [ ] 配置仅允许确认过的 HTTPS 主机与精确路径，无 username/password/query/fragment；凭证文件上限 64 KiB。按 credentials.py 的 openat/O_NOFOLLOW/fstat 前后比对读取，拒绝符号链接、硬链接、不安全所有者或权限；不自动 chmod 用户既有目录，不泄漏解析异常。
-- [ ] 用注入 transport 验证：200 错 id/revision、登录 HTML、所有 3xx 均非 ack；401 全局暂停；429 解析秒或 HTTP 日期、最长 900 秒；404/405/503 sync_unconfigured 低频探测；400/413/415/revision_conflict 隔离；replay 重新 nonce；408/5xx/网络错误重试。响应上限 16 KiB，超限不 ack。
-- [ ] `send_payload` 默认使用校验 TLS 的 urllib opener，显式拒绝重定向，超时 10 秒；HTTPError 读取有界错误响应供分类，日志只输出固定 code。测试临时 0600 配置与伪服务，不连接生产。全部对应测试通过后提交 `feat: add authenticated Signal transport`。
+- [x] 配置仅允许确认过的 HTTPS 主机与精确路径，无 username/password/query/fragment；凭证文件上限 64 KiB。按 credentials.py 的 openat/O_NOFOLLOW/fstat 前后比对读取，拒绝符号链接、硬链接、不安全所有者或权限；不自动 chmod 用户既有目录，不泄漏解析异常。
+- [x] 用注入 transport 验证：200 错 id/revision、登录 HTML、所有 3xx 均非 ack；401 全局暂停；429 解析秒或 HTTP 日期、最长 900 秒；404/405/503 sync_unconfigured 低频探测；400 unsupported_schema 暂停该版本通道，其他 400/413/415/revision_conflict 隔离；replay 重新 nonce；408/5xx/网络错误重试。响应上限 16 KiB，超限不 ack。分类结果增加 scope=item/global/schema 供 Task 3 持久化，不改变上传协议。
+- [x] `send_payload` 默认使用校验 TLS 的 urllib opener，显式拒绝重定向，超时 10 秒；HTTPError 读取有界错误响应供分类，日志只输出固定 code。测试临时 0600 配置与伪服务，不连接生产。全部对应测试通过后提交 `feat: add authenticated Signal transport`。
 
 ## Task 3：可靠 outbox 与双游标
 
@@ -329,4 +332,4 @@ def choose_kind(has_fresh_ca, has_report, consecutive_ca):
 - 设计第 5 节实时窗口、事件、过期和 catchup：Task 1/5/6；网站职责在交接验收，未冒充 Mac 代码覆盖。
 - 设计第 6 节持久队列、权限、签名、故障和资源：Task 2/3/5/6。
 - 设计第 7–8 节初始水位、独立运行与验收：Task 3/6 及交接回滚。
-- 当前明确前置条件只有 Signal 尚未确认 v2 文档；没有需要用户再次确认的产品默认值。本计划未执行，测试状态全部待运行。
+- Signal v2 文档已确认，样例计数修正候选仍待回签。Task 1/2 已开始实施，实际验证与剩余范围见本批次回执；其余任务仍未实现。生产部署、本人独占授权、合成端到端和真实凭证/水位启用仍是后续门槛。

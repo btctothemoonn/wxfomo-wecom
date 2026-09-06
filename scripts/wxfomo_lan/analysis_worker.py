@@ -9,6 +9,7 @@ from collections import namedtuple
 
 from .credentials import CredentialError, load_credential
 from .minimax import MiniMaxClient, MiniMaxError
+from .deepseek import DeepSeekClient
 from .rules import RULE_CATALOG_VERSION, evaluate_message
 from .scheduler import latest_due_windows
 from .briefing import BriefingError, validate_briefing
@@ -187,7 +188,8 @@ class AnalysisWorker(object):
                 credential.revision,
                 timestamp,
             )
-        client = self.client or MiniMaxClient(credential.api_key)
+        client_type = DeepSeekClient if credential.provider == 'deepseek' else MiniMaxClient
+        client = self.client or client_type(credential.api_key)
         try:
             with self.store.lease_guard(self.lease_heartbeat_interval) as lease:
                 outcome = client.analyze_window(

@@ -1,0 +1,37 @@
+{
+  "note": "PUBLIC synthetic offline v2 vectors. Not live credentials. Fixed timestamps require an injected test clock; never send these to production.",
+  "schemaVersion": 2,
+  "secret": "TEST-ONLY-wecom-v2-contract-secret-NOT-FOR-PRODUCTION",
+  "vectors": [
+    {
+      "fixture": "report.example.json",
+      "type": "report",
+      "device": "fixture-device",
+      "timestamp": "1788655810",
+      "nonce": "00000000000000000000000000000001",
+      "body": "{\"report\":{\"briefing\":{\"business\":{\"blockers\":[],\"notices\":[],\"progress\":[],\"tasks\":[]},\"events\":[{\"asset\":\"TEST 演示项目\",\"event\":\"演示信息被第二个合成群转述\",\"impact\":\"讨论范围增加，不等于可信度提高\",\"nature\":\"转述\",\"pending\":\"未提供外部核验\",\"source_message_ids\":[\"M0002\"]}],\"gaps\":[{\"source_message_ids\":[\"M0003\"],\"text\":\"M0003 对应冻结记录目前缺失，原文及身份未同步，也不补写。\"}],\"kind\":\"market\",\"projects\":[{\"addresses\":[{\"address\":\"0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb\",\"chain\":\"Base\",\"source_message_ids\":[\"M0001\"]}],\"catalysts\":\"据小林自述有演示进展，未独立核实。\",\"chain\":\"Base\",\"data\":[{\"kind\":\"历史快照\",\"recorded_at\":\"合成记录：2026-09-06 08:10 Asia/Shanghai\",\"source\":\"合成甲群·小林自述\",\"source_message_ids\":[\"M0001\"],\"unit\":\"演示单位\",\"value\":\"100\"}],\"latest\":\"小周转述的内容没有新增独立证据。\",\"name\":\"TEST 演示项目（合成，非真实标的）\",\"risks\":\"重复讨论不能当作多人独立认可，未进行外部核验。\",\"source_message_ids\":[\"M0001\",\"M0002\"],\"summary\":\"小林自述关注演示项目，小周随后转述；仅为合成总结。\"}],\"quick_read\":{\"focus\":{\"source_message_ids\":[\"M0001\"],\"text\":\"合成甲群的小林关注 TEST 演示项目，未做外部核验。\"},\"news\":{\"source_message_ids\":[\"M0002\"],\"text\":\"合成乙群的小周转述同一演示信息，不构成独立证实。\"},\"risk\":{\"source_message_ids\":[\"M0003\"],\"text\":\"一条冻结来源已不可读，需保留来源缺口。\"}},\"version\":2},\"caCoverage\":{\"exportedItems\":1,\"sourcesComplete\":false,\"totalItems\":1,\"truncated\":false},\"caDiscussions\":[{\"address\":\"0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb\",\"duplicateCount\":1,\"groups\":[\"合成甲群\",\"合成乙群\"],\"mentionCount\":2,\"network\":\"base\",\"sourceMessageIDs\":[\"M0001\",\"M0002\"],\"summary\":\"合成跨群转述聚合，不代表独立证实。\",\"uniqueStatementCount\":1}],\"cadence\":\"two_hour\",\"findings\":[],\"generatedAt\":\"2026-09-06T02:05:00.000Z\",\"id\":\"wecom:fixture-device:00000000-0000-4000-8000-000000000001:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"model\":\"fixture-model\",\"revision\":1,\"scope\":{\"analyzedCount\":3,\"completeChatHistory\":false,\"dataCutoff\":\"2026-09-06T00:30:00.000Z\",\"externalVerification\":false,\"frozenCount\":3,\"groupNames\":[\"合成甲群\",\"合成乙群\"],\"missingCount\":1,\"readableCount\":2,\"timeBasis\":\"notification_observed_at\",\"timeZone\":\"Asia/Shanghai\",\"unknownTimeCount\":0},\"sourceComplete\":false,\"sourceCount\":3,\"sourceReferences\":[{\"available\":true,\"group\":\"合成甲群\",\"id\":\"M0001\",\"observedAt\":\"2026-09-06T00:10:00.000Z\",\"sender\":\"小林（合成昵称）\"},{\"available\":true,\"group\":\"合成乙群\",\"id\":\"M0002\",\"observedAt\":\"2026-09-06T00:30:00.000Z\",\"sender\":\"小周（合成昵称）\"},{\"available\":false,\"group\":null,\"id\":\"M0003\",\"observedAt\":null,\"sender\":null}],\"sources\":[],\"sourcesTruncated\":true,\"summary\":\"合成甲群的小林关注 TEST 演示项目，未做外部核验。\\n合成乙群的小周转述同一演示信息，不构成独立证实。\\n一条冻结来源已不可读，需保留来源缺口。\",\"topics\":[],\"windowEnd\":\"2026-09-06T02:00:00.000Z\",\"windowStart\":\"2026-09-06T00:00:00.000Z\"},\"schemaVersion\":2,\"type\":\"report\"}",
+      "bodySha256": "c10a086260e58808eb52074822a8c7d95cf038dc2eccf1beaf242e7f8589f9aa",
+      "signature": "0412af6f259aa6b572531de52590726bd41cc7438825448c27c743a2041449a7"
+    },
+    {
+      "fixture": "ca-alert.example.json",
+      "type": "ca_alert",
+      "device": "fixture-device",
+      "timestamp": "1788655810",
+      "nonce": "00000000000000000000000000000002",
+      "body": "{\"alert\":{\"address\":\"0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb\",\"catchup\":false,\"duplicateCount\":1,\"evaluatedAt\":\"2026-09-06T00:30:10.000Z\",\"expiresAt\":\"2026-09-06T01:10:00.000Z\",\"firstSeenAt\":\"2026-09-06T00:10:00.000Z\",\"groupCount\":2,\"groups\":[\"合成甲群\",\"合成乙群\"],\"id\":\"wecom-ca:fixture-device:00000000-0000-4000-8000-000000000001:1\",\"lastSeenAt\":\"2026-09-06T00:30:00.000Z\",\"mentionCount\":2,\"network\":\"base\",\"notificationVersion\":1,\"revision\":1,\"status\":\"active\",\"thresholdGroups\":2,\"triggeredAt\":\"2026-09-06T00:30:10.000Z\",\"uniqueStatementCount\":1,\"windowSeconds\":3600},\"schemaVersion\":2,\"type\":\"ca_alert\"}",
+      "bodySha256": "23c2a4967f6762ff0ddf79610999a1981dce157bc1fc633b38e4a9b1dc6aa538",
+      "signature": "7c547b8353c778078654dfca44d1d2556ec6dde052a367a5fc8d9b2c9ce538cc"
+    },
+    {
+      "fixture": "heartbeat.example.json",
+      "type": "heartbeat",
+      "device": "fixture-device",
+      "timestamp": "1788655810",
+      "nonce": "00000000000000000000000000000003",
+      "body": "{\"schemaVersion\":2,\"status\":{\"caDetector\":\"online\",\"lastCaEvaluatedAt\":\"2026-09-06T00:50:00.000Z\",\"lastError\":\"worker_stale\",\"lastMessageObservedAt\":\"2026-09-06T00:30:00.000Z\",\"listener\":\"online\",\"pendingAlerts\":2,\"pendingReports\":1,\"worker\":\"offline\"},\"type\":\"heartbeat\"}",
+      "bodySha256": "ea387f79ecaa5de4a04ea394af1e71046e059216b7e78f00bb6ebd00ca2ae0ea",
+      "signature": "5ecc198c47e615dc5ffa9c9d19e339b617d5e5dd68a59a789358af4abba1a863"
+    }
+  ]
+}

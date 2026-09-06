@@ -1,7 +1,7 @@
 # wxFomo summary-lite: minimal context map
 
 ## Scope
-- Product: macOS WeCom notification capture → local rules + MiniMax summaries → read-only browser.
+- Product: macOS WeCom notification capture → local rules + explicitly selected AI summaries → read-only browser.
 - Retain all configured groups, 2h/6h/24h summaries and source-backed cross-group CA discussions.
 - Do not restore trading, market rankings, voice, native SwiftUI App or workspace.sqlite3 dependencies.
 - Respond in Chinese. Prefer one focused change, targeted tests and concise output; avoid repeated full scans or multi-agent review loops unless requested.
@@ -11,7 +11,8 @@
 - Notification capture/dedup: scripts/wecom-group-listener.swift (standalone; no Sources/).
 - Message DTO/search: scripts/wxfomo_lan/messages.py; new-only nickname extraction: relay.py.
 - Rule matching: rules.py; scheduling and frozen input: scheduler.py, analysis_source.py, analysis_worker.py.
-- Analysis persistence: analysis_store.py; MiniMax HTTPS/validation/chunking: minimax.py; local credentials: credentials.py.
+- Analysis persistence: analysis_store.py; shared AI validation/chunking: minimax.py; DeepSeek adapter: deepseek.py; local provider selection/credentials: credentials.py.
+- Optional Signal sync: signal_contract.py/transport.py/outbox.py/export.py/ca.py/sync.py; scripts/wxfomo-signal-sync.py is explicit opt-in only. Keep this independent of the original launcher.
 - Read-only API: server.py, analysis.py; CA grouping: cross_ca.py; authentication: security.py.
 - UI: web/wxfomo-lan/app.mjs (shell), pages.mjs (reports/rules/status), state.mjs (races/retries), api.mjs.
 - Matching tests: scripts/test_wxfomo_<module>.py; frontend: scripts/test-wxfomo-lan-frontend.mjs.

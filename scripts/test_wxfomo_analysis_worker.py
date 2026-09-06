@@ -119,6 +119,15 @@ class RecordingSource(object):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_explicit_deepseek_selection_never_calls_minimax(self):
+        save_credential(self.credentials_path, 'dummy-deepseek-key', provider='deepseek')
+        with mock.patch('scripts.wxfomo_lan.analysis_worker.DeepSeekClient', return_value=FakeMiniMaxClient()) as selected, \
+             mock.patch('scripts.wxfomo_lan.analysis_worker.MiniMaxClient') as other:
+            tick = self.worker(logger=mock.Mock()).run_once()
+        self.assertEqual(tick.jobs_completed, 1)
+        selected.assert_called_once_with('dummy-deepseek-key')
+        other.assert_not_called()
+
     def test_new_job_never_persists_a_legacy_provider_result(self):
         class LegacyClient(FakeMiniMaxClient):
             def analyze_window(self, *args):

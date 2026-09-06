@@ -426,8 +426,8 @@ class MessageRepository:
             "latestCursor": latest_cursor,
         }
 
-    def by_event_ids(self, event_ids):
-        """Return safe DTOs for exact persisted event IDs without a recency window."""
+    def by_event_ids(self, event_ids, include_canonical_identity=False):
+        """Resolve frozen IDs; canonical identity is opt-in for local aggregation."""
         unique_ids = []
         seen = set()
         for event_id in event_ids:
@@ -468,6 +468,8 @@ class MessageRepository:
                 ).fetchall()
                 for row in rows:
                     by_id[row["event_id"]] = self._message_dto(row)
+                    if include_canonical_identity:
+                        by_id[row["event_id"]]["canonicalEventId"] = row["event_id"]
                 if aliases_available:
                     quarantine_clause = ""
                     if quarantine_available:
@@ -480,6 +482,7 @@ class MessageRepository:
                     alias_rows = connection.execute(
                         """
                         SELECT messages.id, aliases.alias_event_id AS event_id,
+                               messages.event_id AS canonical_event_id,
                                messages.group_name, messages.sender_display_name,
                                messages.content, messages.message_type,
                                messages.observed_at, messages.source_sequence
@@ -493,6 +496,8 @@ class MessageRepository:
                     for row in alias_rows:
                         if row["event_id"] not in by_id:
                             by_id[row["event_id"]] = self._message_dto(row)
+                            if include_canonical_identity:
+                                by_id[row["event_id"]]["canonicalEventId"] = row["canonical_event_id"]
         except sqlite3.Error as error:
             raise MessageSourceUnavailable(
                 _source_error_reason(error, self.database_path)

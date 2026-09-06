@@ -221,7 +221,7 @@ function testUnavailablePagesUseCanonicalCopyAndNeverRenderWriteActions() {
   }
 }
 
-function testProviderPageDisplaysOnlyMiniMaxConfigurationState() {
+function testProviderPageDisplaysOnlyKnownModelConfigurationState() {
   const providerPage = WORKSPACE_PAGES.find((page) => page.id === "providers");
   const root = fakeRoot();
   providerPage.render({
@@ -231,13 +231,15 @@ function testProviderPageDisplaysOnlyMiniMaxConfigurationState() {
       aiConfigured: true,
       speechConfigured: false,
       providerNames: ["UNTRUSTED_PROVIDER_NAME"],
+      model: "deepseek-v4-flash",
       tradingConfigured: false,
       secret: "NEVER_EXPOSE_THIS",
       credentialRevision: "NEVER_EXPOSE_REVISION",
     },
     api: {},
   });
-  assert.ok(root.textContent.includes("MiniMax-M2.7"));
+  assert.ok(root.textContent.includes("deepseek-v4-flash"));
+  assert.ok(!root.textContent.includes("MiniMax-M2.7"));
   assert.ok(root.textContent.includes("已配置"));
   assert.ok(!root.textContent.includes("UNTRUSTED_PROVIDER_NAME"));
   assert.ok(!root.textContent.includes("NEVER_EXPOSE_THIS"));
@@ -2713,7 +2715,7 @@ async function testWorkbenchRuleBadgesKeepOverflowTagsInNamedGroup() {
 
 testWorkspaceRegistryHasExactReadOnlyCoverage();
 testUnavailablePagesUseCanonicalCopyAndNeverRenderWriteActions();
-testProviderPageDisplaysOnlyMiniMaxConfigurationState();
+testProviderPageDisplaysOnlyKnownModelConfigurationState();
 testSourceLinkAcceptsOnlyHttpsAndUsesSafeRelationship();
 testPublicSourceHostAllowlistMatchesTheDocumentedContract();
 testReadOnlyPageNavigationResolvesOnlyRegisteredHashes();

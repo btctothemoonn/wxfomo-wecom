@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.wxfomo_lan.cross_ca import cross_ca_cards
+from scripts.wxfomo_lan.cross_ca import address_mentions, cross_ca_cards
 
 
 CA = "0x" + "a" * 40
@@ -12,6 +12,14 @@ def msg(event, group, author, content):
 
 
 class CrossCATests(unittest.TestCase):
+    def test_address_mentions_preserve_display_case_and_normalize_only_the_key(self):
+        address = "0x" + "Ab" * 20
+        self.assertEqual(address_mentions("Base CA: " + address), [{
+            "address": address,
+            "normalizedAddress": address.lower(),
+            "network": "base",
+        }])
+
     def test_neighbor_discussion_is_cited_without_inflating_mentions(self):
         messages = [msg('a', '甲群', '猫', 'Base CA: ' + CA),
                     msg('b', '甲群', '狗', '上面那个有风险')]

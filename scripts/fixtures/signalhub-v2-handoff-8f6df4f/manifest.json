@@ -1,0 +1,13 @@
+{
+  "repository": "btctothemoonn/SIgnal-hub",
+  "commit": "8f6df4f9e8ed7812ba06f6b92b481ca12f5c0939",
+  "files": {
+    "ca-alert-catchup.example.json": "4e169be61b87449c57bc32a04a8eab001442fe9a",
+    "ca-alert-expired.example.json": "eff278f1d98aa58e2770b42117697eb7c1e48566",
+    "ca-alert.example.json": "e63ff4d76bf8026f39c87872962307c7b754bb59",
+    "heartbeat.example.json": "85178697c787d3a2122bc2036aff5b5e16013617",
+    "report-business.example.json": "c41a8ce4157ddff28edd3928819d4eb3e0a06ef1",
+    "report.example.json": "1e001dfc78e20294c505111b1cf815f6ef599307",
+    "signature.example.json": "f6b71d9d029c2a6e335bbc9965be967f83cafd63"
+  }
+}

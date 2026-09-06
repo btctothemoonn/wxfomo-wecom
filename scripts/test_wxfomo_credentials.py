@@ -41,6 +41,43 @@ def _load_configure_module():
 
 
 class CredentialTests(unittest.TestCase):
+    def test_provider_switch_preserves_other_key_and_never_falls_back(self):
+        import json
+        save_credential(self.path, 'dummy-original-key')
+        save_credential(self.path, 'dummy-deepseek-key', provider='deepseek')
+        configured = load_credential(self.path)
+        self.assertEqual(configured.provider, 'deepseek')
+        self.assertEqual(configured.api_key, 'dummy-deepseek-key')
+        with open(self.path) as handle:
+            value = json.load(handle)
+        self.assertEqual(value['miniMaxAPIKey'], 'dummy-original-key')
+        self.assertNotIn('dummy-deepseek-key', repr(configured))
+        value.pop('deepSeekAPIKey')
+        with open(self.path, 'w') as handle:
+            json.dump(value, handle)
+        with self.assertRaises(CredentialError):
+            load_credential(self.path)
+
+    def test_legacy_configuration_defaults_to_minimax(self):
+        save_credential(self.path, 'dummy-key')
+        self.assertEqual(load_credential(self.path).provider, 'minimax')
+
+    def test_unknown_provider_is_rejected_before_writing(self):
+        with self.assertRaises(CredentialError):
+            save_credential(self.path, 'dummy-key', provider='unknown')
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_settings_uses_last_successful_model_without_reading_credentials(self):
+        from scripts.wxfomo_lan.analysis import AnalysisRepository
+        repository = AnalysisRepository('synthetic-only')
+        status = dict(credential_status='configured', last_provider_success_at=None, last_error_code=None)
+        with mock.patch.object(repository, '_rows', side_effect=[(None, [status]), (None, [{'model': 'deepseek-v4-flash'}])]), \
+             mock.patch('builtins.open', side_effect=AssertionError('must not open credentials')):
+            actual = repository.settings_status()
+        self.assertEqual(actual['model'], 'deepseek-v4-flash')
+        self.assertEqual(actual['modelBasis'], 'last_successful_report')
+        self.assertEqual(actual['protocol'], 'openai_compatible')
+
     def setUp(self):
         if CREDENTIAL_IMPORT_ERROR is not None:
             self.fail("credential module is missing: {0}".format(CREDENTIAL_IMPORT_ERROR))

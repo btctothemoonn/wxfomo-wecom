@@ -703,7 +703,9 @@ class LanServerTests(unittest.TestCase):
                 settings = json.loads(body)
                 self.assertEqual(settings["available"], True)
                 self.assertEqual(settings["aiConfigured"], True)
-                self.assertEqual(settings["providerNames"], ["MiniMax-M2.7"])
+                self.assertEqual(settings["providerNames"], [])
+                self.assertIsNone(settings['model'])
+                self.assertEqual(settings['modelBasis'], 'last_successful_report')
                 status, _, body = self.request_from_server(
                     temporary_server,
                     "GET",
@@ -717,6 +719,19 @@ class LanServerTests(unittest.TestCase):
                     "schema_incompatible",
                 )
             self.assertNotIn("dummy-plan-key", json.dumps((settings, diagnostics)))
+            with sqlite3.connect(analysis_path) as connection:
+                connection.execute('CREATE TABLE analysis_results(analysis_id INTEGER PRIMARY KEY,model TEXT)')
+            for model, expected in (('MiniMax-M2.7', 'MiniMax-M2.7'),
+                                    ('deepseek-v4-flash', 'deepseek-v4-flash'),
+                                    ('untrusted-private-model', None)):
+                with sqlite3.connect(analysis_path) as connection:
+                    connection.execute('INSERT INTO analysis_results(model) VALUES (?)', (model,))
+                with mock.patch('builtins.open', side_effect=AssertionError('opened credentials')):
+                    public = AnalysisRepository(analysis_path).settings_status()
+                self.assertEqual(public['model'], expected)
+                self.assertEqual(public['providerNames'], [expected] if expected else [])
+                self.assertEqual(public['modelBasis'], 'last_successful_report')
+                self.assertNotIn('untrusted-private-model', json.dumps(public))
         finally:
             temporary_server.shutdown()
             temporary_server.server_close()

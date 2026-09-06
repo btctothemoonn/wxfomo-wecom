@@ -961,6 +961,7 @@ class MiniMaxTests(unittest.TestCase):
                     {
                         "address": retained_address,
                         "context_source_message_ids": ["event-0"],
+                        "direct_source_message_ids": ["event-0"],
                     }
                 ],
             )

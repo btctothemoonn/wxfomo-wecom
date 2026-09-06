@@ -1027,14 +1027,15 @@ export function renderRules({ root, payload, api }) {
 
 export function renderProviders({ root, payload, api }) {
   void api;
-  const page = begin(root, "配置中心", "仅显示 MiniMax 模型与配置状态，不传输凭据", payload);
+  const page = begin(root, "配置中心", "仅显示 AI 配置状态与最近成功模型，不传输凭据", payload);
   if (page.unavailable) {
     return cleanup;
   }
   const document = page.document;
-  const providerSection = section(document, "MiniMax 分析服务", "浏览器不会显示或读取凭据内容");
+  const providerSection = section(document, "AI 分析服务", "最近成功报告所用模型；浏览器不会读取凭据内容");
   const card = element(document, "article", "provider-card");
-  card.appendChild(element(document, "h3", "record-title", "MiniMax-M2.7"));
+  const model = ["MiniMax-M2.7", "deepseek-v4-flash"].includes(payload.model) ? payload.model : "模型待确认";
+  card.appendChild(element(document, "h3", "record-title", model));
   card.appendChild(StatusPill(
     document,
     payload.aiConfigured === true ? "已配置" : "未配置",
@@ -1102,7 +1103,7 @@ export function renderDiagnostics({ root, payload, api }) {
   const worker = object(payload.analysisWorker);
   const jobCounts = object(payload.jobCounts);
   if (Object.keys(worker).length || Object.keys(jobCounts).length) {
-    const analysis = section(document, "MiniMax 分析", "后台运行与已记录任务状态");
+    const analysis = section(document, "AI 分析", "后台运行与已记录任务状态");
     analysis.appendChild(ReadonlyControl(document, "分析工作器", worker.active === true ? "活动中" : "未活动"));
     const labels = [
       ["等待执行", jobCounts.queued], ["正在分析", jobCounts.running],
