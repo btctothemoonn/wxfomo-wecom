@@ -83,6 +83,8 @@ DeepSeek 使用 `deepseek-v4-flash` 非思考模式及稳定 JSON 输出接口�
 
 Mac 侧已提供独立同步模块；原启动脚本不会启动它。网站接收接口、本人登录授权、两端合成联调和专用同步凭证就绪后，才能另行启用。当前不能把“本地代码通过测试”理解为“网站已经同步”。交接与限制见 [Signal v2 交接](docs/integrations/signalhub-v2-foundation.md)。
 
+Mac 功能已发布，Signal 网站端仍待实现；接续工作请使用 [给 Signal Codex 的接入清单](docs/integrations/signalhub-v2-connect-handoff.md)，不要仅凭部署 Mac 同步器就向生产发送。
+
 ```sh
 python3 scripts/wxfomo-signal-sync.py --help
 ```
