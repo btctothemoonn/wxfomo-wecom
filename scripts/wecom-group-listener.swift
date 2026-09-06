@@ -59,9 +59,19 @@ private var didStopAfterSourceValidationForTest = false
 private var didStopAfterStartupBindingForTest = false
 private var didStopBeforeSourceValidationConfirmationForTest = false
 
+private enum ListenerTestFlags {
+  static let stopAfterSourceValidation = getenv("WXFOMO_TEST_STOP_AFTER_SOURCE_VALIDATION")
+    .map { strcmp($0, "1") == 0 } ?? false
+  static let stopAfterStartupBinding = getenv("WXFOMO_TEST_STOP_AFTER_STARTUP_BINDING")
+    .map { strcmp($0, "1") == 0 } ?? false
+  static let stopBeforeSourceValidationConfirmation = getenv(
+    "WXFOMO_TEST_STOP_BEFORE_SOURCE_VALIDATION_CONFIRMATION"
+  ).map { strcmp($0, "1") == 0 } ?? false
+}
+
 private func stopAfterSourceValidationForTestIfRequested() {
   guard !didStopAfterSourceValidationForTest,
-    ProcessInfo.processInfo.environment["WXFOMO_TEST_STOP_AFTER_SOURCE_VALIDATION"] == "1"
+    ListenerTestFlags.stopAfterSourceValidation
   else {
     return
   }
@@ -71,7 +81,7 @@ private func stopAfterSourceValidationForTestIfRequested() {
 
 private func stopAfterStartupBindingForTestIfRequested() {
   guard !didStopAfterStartupBindingForTest,
-    ProcessInfo.processInfo.environment["WXFOMO_TEST_STOP_AFTER_STARTUP_BINDING"] == "1"
+    ListenerTestFlags.stopAfterStartupBinding
   else {
     return
   }
@@ -81,9 +91,7 @@ private func stopAfterStartupBindingForTestIfRequested() {
 
 private func stopBeforeSourceValidationConfirmationForTestIfRequested() {
   guard !didStopBeforeSourceValidationConfirmationForTest,
-    ProcessInfo.processInfo.environment[
-      "WXFOMO_TEST_STOP_BEFORE_SOURCE_VALIDATION_CONFIRMATION"
-    ] == "1"
+    ListenerTestFlags.stopBeforeSourceValidationConfirmation
   else {
     return
   }
@@ -3982,63 +3990,139 @@ do {
   var lastHeartbeat = Date().timeIntervalSince1970
   var sourceIsReady = true
   while true {
-    if options.once && Date() >= deadline { throw ListenerError.timedOut(options.timeout) }
-    Thread.sleep(forTimeInterval: options.pollInterval)
-    let observedSourceKey: String
-    do {
-      observedSourceKey = try validatedNotificationSourceKey(databasePath)
-    } catch {
-      if sourceIsReady {
-        try markSourceUnavailableWithRetry(
+    // Drain Foundation temporaries on every poll, including retry/skip paths.
+    try autoreleasepool {
+      if options.once && Date() >= deadline { throw ListenerError.timedOut(options.timeout) }
+      Thread.sleep(forTimeInterval: options.pollInterval)
+      let observedSourceKey: String
+      do {
+        observedSourceKey = try validatedNotificationSourceKey(databasePath)
+      } catch {
+        if sourceIsReady {
+          try markSourceUnavailableWithRetry(
+            database: messageDatabase,
+            options: options,
+            deadline: deadline
+          )
+          sourceIsReady = false
+        }
+        if options.once && Date() >= deadline { throw ListenerError.timedOut(options.timeout) }
+        if waitIfNotificationSourceIsNotReady(databasePath, interval: options.pollInterval) {
+          return
+        }
+        let currentIdentity = try? notificationSourceKey(databasePath)
+        if currentIdentity != sourceKey { return }
+        guard waitIfDatabaseIsTransient(error, interval: options.pollInterval) else { throw error }
+        return
+      }
+      stopAfterSourceValidationForTestIfRequested()
+
+      if observedSourceKey != sourceKey {
+        sourceKey = observedSourceKey
+        _ = try bindSourceWithRetry(
           database: messageDatabase,
+          sourceKey: sourceKey,
           options: options,
           deadline: deadline
         )
-        sourceIsReady = false
+        cursor = NotificationCursor(timestamp: 0, recordID: Int64.min)
+        let replacement: [StoredNotification]
+        do {
+          replacement = try fetchNotifications(
+            databasePath: databasePath,
+            sourceIdentity: sourceKey,
+            fetch: .latest(batchSize)
+          )
+        } catch {
+          try markSourceUnavailableWithRetry(
+            database: messageDatabase,
+            options: options,
+            deadline: deadline
+          )
+          sourceIsReady = false
+          if waitIfNotificationSourceIsNotReady(databasePath, interval: options.pollInterval) {
+            return
+          }
+          if waitIfDatabaseIsTransient(error, interval: options.pollInterval) { return }
+          let currentIdentity = try? notificationSourceKey(databasePath)
+          if currentIdentity != sourceKey { return }
+          throw error
+        }
+        for notification in replacement where cursor.accepts(notification) {
+          let message = decodeMessage(notification, groups: groups)
+          let inserted = try persistWithRetry(
+            database: messageDatabase,
+            notification: notification,
+            message: message,
+            options: options,
+            deadline: deadline
+          )
+          cursor.advance(to: notification)
+          if inserted, let message = message {
+            try markReadyWithRetry(
+              database: messageDatabase,
+              options: options,
+              deadline: deadline
+            )
+            output(message, deliveredAt: notification.deliveredAt)
+            if options.once { exit(0) }
+          }
+        }
+        if replacement.isEmpty {
+          try saveBaselineWithRetry(
+            database: messageDatabase,
+            cursor: cursor,
+            options: options,
+            deadline: deadline
+          )
+        }
+        try markReadyWithRetry(database: messageDatabase, options: options, deadline: deadline)
+        sourceIsReady = true
+        lastHeartbeat = Date().timeIntervalSince1970
+        return
       }
-      if options.once && Date() >= deadline { throw ListenerError.timedOut(options.timeout) }
-      if waitIfNotificationSourceIsNotReady(databasePath, interval: options.pollInterval) {
-        continue
-      }
-      let currentIdentity = try? notificationSourceKey(databasePath)
-      if currentIdentity != sourceKey { continue }
-      guard waitIfDatabaseIsTransient(error, interval: options.pollInterval) else { throw error }
-      continue
-    }
-    stopAfterSourceValidationForTestIfRequested()
 
-    if observedSourceKey != sourceKey {
-      sourceKey = observedSourceKey
-      _ = try bindSourceWithRetry(
-        database: messageDatabase,
-        sourceKey: sourceKey,
-        options: options,
-        deadline: deadline
-      )
-      cursor = NotificationCursor(timestamp: 0, recordID: Int64.min)
-      let replacement: [StoredNotification]
+      let records: [StoredNotification]
       do {
-        replacement = try fetchNotifications(
+        records = try fetchNotifications(
           databasePath: databasePath,
           sourceIdentity: sourceKey,
-          fetch: .latest(batchSize)
+          fetch: .since(cursor.timestamp, cursor.recordID, batchSize)
         )
       } catch {
-        try markSourceUnavailableWithRetry(
-          database: messageDatabase,
-          options: options,
-          deadline: deadline
-        )
-        sourceIsReady = false
-        if waitIfNotificationSourceIsNotReady(databasePath, interval: options.pollInterval) {
-          continue
+        if sourceIsReady {
+          try markSourceUnavailableWithRetry(
+            database: messageDatabase,
+            options: options,
+            deadline: deadline
+          )
+          sourceIsReady = false
         }
-        if waitIfDatabaseIsTransient(error, interval: options.pollInterval) { continue }
+        if waitIfNotificationSourceIsNotReady(databasePath, interval: options.pollInterval) {
+          return
+        }
         let currentIdentity = try? notificationSourceKey(databasePath)
-        if currentIdentity != sourceKey { continue }
-        throw error
+        if currentIdentity != sourceKey { return }
+        guard waitIfDatabaseIsTransient(error, interval: options.pollInterval) else { throw error }
+        return
       }
-      for notification in replacement where cursor.accepts(notification) {
+      let heartbeatTime = Date().timeIntervalSince1970
+      if !sourceIsReady {
+        try markReadyWithRetry(database: messageDatabase, options: options, deadline: deadline)
+        sourceIsReady = true
+        lastHeartbeat = heartbeatTime
+      } else if heartbeatTime - lastHeartbeat >= 1 {
+        do {
+          try messageDatabase.heartbeat(at: heartbeatTime)
+          lastHeartbeat = heartbeatTime
+        } catch {
+          if options.once && Date() >= deadline { throw ListenerError.timedOut(options.timeout) }
+          guard waitIfDatabaseIsTransient(error, interval: options.pollInterval) else { throw error }
+          return
+        }
+      }
+      for notification in records {
+        guard cursor.accepts(notification) else { continue }
         let message = decodeMessage(notification, groups: groups)
         let inserted = try persistWithRetry(
           database: messageDatabase,
@@ -4049,82 +4133,9 @@ do {
         )
         cursor.advance(to: notification)
         if inserted, let message = message {
-          try markReadyWithRetry(
-            database: messageDatabase,
-            options: options,
-            deadline: deadline
-          )
           output(message, deliveredAt: notification.deliveredAt)
           if options.once { exit(0) }
         }
-      }
-      if replacement.isEmpty {
-        try saveBaselineWithRetry(
-          database: messageDatabase,
-          cursor: cursor,
-          options: options,
-          deadline: deadline
-        )
-      }
-      try markReadyWithRetry(database: messageDatabase, options: options, deadline: deadline)
-      sourceIsReady = true
-      lastHeartbeat = Date().timeIntervalSince1970
-      continue
-    }
-
-    let records: [StoredNotification]
-    do {
-      records = try fetchNotifications(
-        databasePath: databasePath,
-        sourceIdentity: sourceKey,
-        fetch: .since(cursor.timestamp, cursor.recordID, batchSize)
-      )
-    } catch {
-      if sourceIsReady {
-        try markSourceUnavailableWithRetry(
-          database: messageDatabase,
-          options: options,
-          deadline: deadline
-        )
-        sourceIsReady = false
-      }
-      if waitIfNotificationSourceIsNotReady(databasePath, interval: options.pollInterval) {
-        continue
-      }
-      let currentIdentity = try? notificationSourceKey(databasePath)
-      if currentIdentity != sourceKey { continue }
-      guard waitIfDatabaseIsTransient(error, interval: options.pollInterval) else { throw error }
-      continue
-    }
-    let heartbeatTime = Date().timeIntervalSince1970
-    if !sourceIsReady {
-      try markReadyWithRetry(database: messageDatabase, options: options, deadline: deadline)
-      sourceIsReady = true
-      lastHeartbeat = heartbeatTime
-    } else if heartbeatTime - lastHeartbeat >= 1 {
-      do {
-        try messageDatabase.heartbeat(at: heartbeatTime)
-        lastHeartbeat = heartbeatTime
-      } catch {
-        if options.once && Date() >= deadline { throw ListenerError.timedOut(options.timeout) }
-        guard waitIfDatabaseIsTransient(error, interval: options.pollInterval) else { throw error }
-        continue
-      }
-    }
-    for notification in records {
-      guard cursor.accepts(notification) else { continue }
-      let message = decodeMessage(notification, groups: groups)
-      let inserted = try persistWithRetry(
-        database: messageDatabase,
-        notification: notification,
-        message: message,
-        options: options,
-        deadline: deadline
-      )
-      cursor.advance(to: notification)
-      if inserted, let message = message {
-        output(message, deliveredAt: notification.deliveredAt)
-        if options.once { exit(0) }
       }
     }
   }
